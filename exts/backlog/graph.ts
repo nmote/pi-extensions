@@ -66,7 +66,7 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 	for (const id of [...selected].sort()) {
 		const item = snapshot.items.get(id)?.item;
 		if (!item) unreadable.push(id);
-		const label = item ? `${id}\n${item.title}\n[${item.status}]` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
+		const label = item ? `${id}\n${item.title}\n[${item.status}]\nRepos: ${item.repos.join(", ")}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
 		const fill = item ? STATUS_COLORS[item.status] : "#ffcccc";
 		lines.push(`  ${quote(id)} [label=${quote(label)}, fillcolor=${quote(fill)}];`);
 	}

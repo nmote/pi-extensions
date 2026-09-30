@@ -47,7 +47,7 @@ const connected = snapshot(
 		item("aa0001", { dependsOn: ["bb0002"] }),
 		item("bb0002", { parent: "aa0001", status: "approved", dependsOn: ["cc0003", "gg0007"] }),
 		item("cc0003", { title: 'Quote "hello" \\N <x>', status: "done", repos: ["~/two"] }),
-		item("dd0004", { dependsOn: ["bb0002", "jj0009"], status: "in_progress" }),
+		item("dd0004", { dependsOn: ["bb0002", "jj0009"], status: "in_progress", repos: ["~/one", "~/two"] }),
 		item("ee0005", { dependsOn: ["cc0003"], status: "dropped" }),
 		item("hh0008"),
 	],
@@ -66,8 +66,13 @@ check(
 );
 check(
 	"quotes title text instead of accepting DOT syntax or Graphviz escapes",
-	graph.dot.includes('label="cc0003\\nQuote \\"hello\\" \\\\N <x>\\n[done]"') &&
+	graph.dot.includes('label="cc0003\\nQuote \\"hello\\" \\\\N <x>\\n[done]\\nRepos: ~/two"') &&
 		graph.dot.includes('fillcolor="#e8e8e8"'),
+);
+check(
+	"shows every repository associated with each item",
+	graph.dot.includes('label="aa0001\\naa0001\\n[open]\\nRepos: ~/one"') &&
+		graph.dot.includes('label="dd0004\\ndd0004\\n[in_progress]\\nRepos: ~/one, ~/two"'),
 );
 check(
 	"shows missing and malformed linked nodes without inventing details",
