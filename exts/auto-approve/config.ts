@@ -82,21 +82,18 @@ export interface AutoApproveConfig {
 	evaluator: EvaluatorConfig;
 }
 
-const DEFAULT_EVALUATOR: EvaluatorConfig = {
-	reasoningEffort: "medium",
-	timeoutMs: 8000,
-	memoize: true,
-};
+const BUNDLED_DEFAULTS_PATH = fileURLToPath(new URL("./defaults.json", import.meta.url));
 
-export const DEFAULTS: AutoApproveConfig = {
-	defaultMode: "auto",
-	allow: [],
-	deny: [],
-	context: [],
-	writeRoots: [],
-	readRoots: [],
-	evaluator: DEFAULT_EVALUATOR,
-};
+function engineDefaults(): Pick<AutoApproveConfig, "defaultMode" | "evaluator"> {
+	const raw = readRawConfig(BUNDLED_DEFAULTS_PATH);
+	const evaluator = raw.evaluator as Partial<EvaluatorConfig> | undefined;
+	if (!isMode(raw.defaultMode) || !evaluator || !isEffort(evaluator.reasoningEffort) ||
+		typeof evaluator.timeoutMs !== "number" || !Number.isFinite(evaluator.timeoutMs) || evaluator.timeoutMs <= 0 ||
+		typeof evaluator.memoize !== "boolean") {
+		throw new ImportResolutionError("auto-approve: invalid bundled engine settings");
+	}
+	return { defaultMode: raw.defaultMode, evaluator: evaluator as EvaluatorConfig };
+}
 
 export function configPath(): string {
 	return join(getAgentDir(), "extensions", "auto-approve.json");
@@ -271,7 +268,7 @@ function resolveRawConfig(
 	let merged: RawConfig = {};
 	for (const specifier of importSpecifiers(raw)) {
 		let importedPath: string;
-		if (specifier === "builtin:defaults") importedPath = fileURLToPath(new URL("./defaults.json", import.meta.url));
+		if (specifier === "builtin:defaults") importedPath = BUNDLED_DEFAULTS_PATH;
 		else if (specifier.startsWith("builtin:")) {
 			throw new ImportResolutionError(`auto-approve: unknown builtin import "${specifier}" in ${file}`);
 		} else importedPath = expandImportPath(specifier, file, homeDir);
@@ -289,29 +286,35 @@ export function resolveConfig(rootPath: string, homeDir: string): RawConfig {
 export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 	const path = configPath();
 	let raw: RawConfig;
+	let defaults: Pick<AutoApproveConfig, "defaultMode" | "evaluator"> | undefined;
 
 	try {
+		defaults = engineDefaults();
 		if (seed) seedConfig(path);
 		raw = configExists(path) ? resolveConfig(path, homedir()) : {};
 	} catch (error) {
 		// A partial or unavailable policy cannot grant permissions.
 		console.error(`auto-approve: configuration unavailable, failing closed to manual mode: ${error instanceof Error ? error.message : String(error)}`);
-		return { ...DEFAULTS, defaultMode: "manual" };
+		return {
+			defaultMode: "manual", allow: [], deny: [], context: [], writeRoots: [], readRoots: [],
+			// Manual mode does not evaluate unmatched calls.
+			evaluator: defaults?.evaluator ?? { reasoningEffort: "low", timeoutMs: 0, memoize: false },
+		};
 	}
 
 	const rawEval = (raw.evaluator && typeof raw.evaluator === "object" ? raw.evaluator : {}) as Partial<EvaluatorConfig>;
 
 	return {
-		defaultMode: isMode(raw.defaultMode) ? raw.defaultMode : DEFAULTS.defaultMode,
+		defaultMode: isMode(raw.defaultMode) ? raw.defaultMode : defaults.defaultMode,
 		allow: asMatchers(raw.allow),
 		deny: asMatchers(raw.deny),
 		context: asContextRules(raw.context),
 		writeRoots: asStrings(raw.writeRoots),
 		readRoots: asStrings(raw.readRoots),
 		evaluator: {
-			reasoningEffort: isEffort(rawEval.reasoningEffort) ? rawEval.reasoningEffort : DEFAULT_EVALUATOR.reasoningEffort,
-			timeoutMs: typeof rawEval.timeoutMs === "number" && rawEval.timeoutMs > 0 ? rawEval.timeoutMs : DEFAULT_EVALUATOR.timeoutMs,
-			memoize: typeof rawEval.memoize === "boolean" ? rawEval.memoize : DEFAULT_EVALUATOR.memoize,
+			reasoningEffort: isEffort(rawEval.reasoningEffort) ? rawEval.reasoningEffort : defaults.evaluator.reasoningEffort,
+			timeoutMs: typeof rawEval.timeoutMs === "number" && Number.isFinite(rawEval.timeoutMs) && rawEval.timeoutMs > 0 ? rawEval.timeoutMs : defaults.evaluator.timeoutMs,
+			memoize: typeof rawEval.memoize === "boolean" ? rawEval.memoize : defaults.evaluator.memoize,
 		},
 	};
 }

@@ -3,11 +3,11 @@
  *   ./scripts/test exts/auto-approve
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { DEFAULTS, FIRST_TIME_CONFIG, loadConfig, mergeRaw, resolveConfig, saveEvaluatorEffort, seedConfig } from "./config.ts";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { FIRST_TIME_CONFIG, loadConfig, mergeRaw, resolveConfig, saveEvaluatorEffort, seedConfig } from "./config.ts";
 import type { RawConfig } from "./config.ts";
 
 let failures = 0;
@@ -42,6 +42,8 @@ const file = (name: string, content: string): string => {
 };
 
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+const emptyPolicy = (config: ReturnType<typeof loadConfig>): boolean =>
+	[config.allow, config.deny, config.context, config.writeRoots, config.readRoots].every((entries) => entries.length === 0);
 
 try {
 	const seeded = join(files, "seeded", "auto-approve.json");
@@ -66,18 +68,43 @@ try {
 	try {
 		process.env.PI_CODING_AGENT_DIR = join(files, "agent");
 		const localConfig = join(process.env.PI_CODING_AGENT_DIR, "extensions", "auto-approve.json");
-		check("loading without a session does not seed policy", JSON.stringify(loadConfig()) === JSON.stringify(DEFAULTS));
-		check("engine effort defaults to medium", loadConfig().evaluator.reasoningEffort === "medium");
+		const missing = loadConfig();
+		check("missing config inherits settings without policy", emptyPolicy(missing) && missing.defaultMode === "auto" && missing.evaluator.reasoningEffort === "medium" && missing.evaluator.timeoutMs === 20000 && missing.evaluator.memoize);
 		loadConfig({ seed: true });
 		check("session loading seeds and loads policy", loadConfig().allow.length === preset.allow.length);
 		check("bundled effort defaults to medium", loadConfig().evaluator.reasoningEffort === "medium");
 		writeFileSync(localConfig, '{"imports":["builtin:defaults"],"evaluator":{"reasoningEffort":"low"}}');
 		check("explicit effort overrides the bundled default", loadConfig().evaluator.reasoningEffort === "low");
 		writeFileSync(localConfig, "{}");
-		check("intentionally empty policy uses only engine defaults", JSON.stringify(loadConfig({ seed: true })) === JSON.stringify(DEFAULTS));
+		const empty = loadConfig({ seed: true });
+		check("intentionally empty policy inherits settings without permissions", emptyPolicy(empty) && JSON.stringify(empty) === JSON.stringify(missing) && empty.evaluator.timeoutMs === 20000);
+		writeFileSync(localConfig, '{"defaultMode":"yolo","evaluator":{"memoize":false}}');
+		const partial = loadConfig();
+		check("partial overrides preserve other engine settings", emptyPolicy(partial) && partial.defaultMode === "yolo" && !partial.evaluator.memoize && partial.evaluator.reasoningEffort === "medium" && partial.evaluator.timeoutMs === 20000);
+		writeFileSync(localConfig, '{"defaultMode":"invalid","evaluator":{"reasoningEffort":"invalid","timeoutMs":0,"memoize":"yes"}}');
+		check("invalid values fall back to bundled settings", JSON.stringify(loadConfig()) === JSON.stringify(missing));
 		writeFileSync(localConfig, '{"imports":["builtin:defaults","builtin:bad"],"allow":[{"tool":"bash","pattern":".*"}]}');
 		const failed = loadConfig({ seed: true });
-		check("bad import fails closed without partially granting the preset", failed.defaultMode === "manual" && failed.allow.length === 0 && failed.context.length === 0 && failed.writeRoots.length === 0);
+		check("bad import fails closed without partially granting the preset", failed.defaultMode === "manual" && emptyPolicy(failed));
+
+		// Isolate bundled-file failures without altering the installed preset.
+		const isolated = join(temp, "isolated");
+		mkdirSync(join(isolated, "auto-approve"), { recursive: true });
+		writeFileSync(join(isolated, "package.json"), '{"type":"module"}');
+		copyFileSync(new URL("./config.ts", import.meta.url), join(isolated, "auto-approve", "config.ts"));
+		symlinkSync(fileURLToPath(new URL("../shared", import.meta.url)), join(isolated, "shared"), "dir");
+		symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(isolated, "node_modules"), "dir");
+		const isolatedConfig = await import(pathToFileURL(join(isolated, "auto-approve", "config.ts")).href);
+		const isolatedPreset = join(isolated, "auto-approve", "defaults.json");
+		writeFileSync(localConfig, "{}");
+		for (const content of [undefined, "{oops", '{}']) {
+			if (content !== undefined) writeFileSync(isolatedPreset, content);
+			const unavailable = isolatedConfig.loadConfig();
+			check(`unavailable bundled settings fail closed (${content ?? "missing"})`, unavailable.defaultMode === "manual" && emptyPolicy(unavailable));
+		}
+		writeFileSync(isolatedPreset, JSON.stringify({ ...preset, defaultMode: "manual", evaluator: { reasoningEffort: "high", timeoutMs: 12345, memoize: false } }));
+		const authoritative = isolatedConfig.loadConfig();
+		check("bundled file is authoritative without importing its policy", authoritative.defaultMode === "manual" && emptyPolicy(authoritative) && authoritative.evaluator.reasoningEffort === "high" && authoritative.evaluator.timeoutMs === 12345 && !authoritative.evaluator.memoize);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

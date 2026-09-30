@@ -94,7 +94,12 @@ omits the item when none remain.
 
 At the first session startup, an absent
 `<agent-dir>/extensions/auto-approve.json` is atomically seeded with a default
-approval policy.
+approval policy via `builtin:defaults`.
+
+Bundled `exts/auto-approve/defaults.json` supplies mode and evaluator settings
+for every configuration. Permissions require an explicit import; a missing
+config or deliberate `{}` inherits settings with empty policy lists.
+Configuration failures use manual mode with empty policy lists.
 
 The default grants tool-level approval to most extension-provided tools along
 with a few other allowances.
@@ -110,7 +115,8 @@ configured roots, excluding Git/Hg metadata. Global skill reads are in scope.
 `manual` prompts for unmatched calls, `auto` evaluates them, and `yolo` allows
 them; deny rules apply in every mode. `/auto`, `/auto manual|auto|yolo`,
 `/auto effort`, `/auto test`, and `/auto stats` inspect/control policy. `--auto`
-overrides startup mode. Evaluator effort defaults to `medium`; override it with
+overrides startup mode. Evaluations default to a 20,000 ms timeout and memoization.
+Evaluator effort defaults to `medium`; override it with
 `/auto effort low|medium|high` or `evaluator.reasoningEffort` in config.
 Evaluator failure/review never grants access; prompts
 without a usable UI block. **This is not an OS sandbox.**
