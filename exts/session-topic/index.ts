@@ -1,3 +1,4 @@
+import { SESSION_TOPIC_STATUS_KEY } from "../shared/footer-status.ts";
 import type { Model, Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -436,7 +437,7 @@ export function registerSessionTopic(
 		const statusRequest = Symbol();
 		const requestSessionRevision = sessionRevision;
 		activeTopicRequests.add(statusRequest);
-		request.ctx.ui.setStatus("session-topic", request.ctx.ui.theme.fg("dim", "[summarizing…]"));
+		request.ctx.ui.setStatus(SESSION_TOPIC_STATUS_KEY, request.ctx.ui.theme.fg("dim", "[summarizing…]"));
 		try {
 			return await dependencies.generateTopic(
 				model,
@@ -452,7 +453,7 @@ export function registerSessionTopic(
 		} finally {
 			activeTopicRequests.delete(statusRequest);
 			if (requestSessionRevision === sessionRevision && activeTopicRequests.size === 0) {
-				request.ctx.ui.setStatus("session-topic", undefined);
+				request.ctx.ui.setStatus(SESSION_TOPIC_STATUS_KEY, undefined);
 			}
 		}
 	}
@@ -647,7 +648,7 @@ export function registerSessionTopic(
 		refreshRequested = false;
 		nameRevision = 0;
 		persistAfterTurn = false;
-		ctx.ui.setStatus("session-topic", undefined);
+		ctx.ui.setStatus(SESSION_TOPIC_STATUS_KEY, undefined);
 		restoreState(ctx, false);
 	});
 
@@ -667,7 +668,7 @@ export function registerSessionTopic(
 		modelDeclined = false;
 		refreshRequested = false;
 		persistAfterTurn = false;
-		ctx.ui.setStatus("session-topic", undefined);
+		ctx.ui.setStatus(SESSION_TOPIC_STATUS_KEY, undefined);
 		restoreState(ctx, true);
 	});
 
@@ -833,7 +834,7 @@ export function registerSessionTopic(
 		promptAbort?.abort();
 		promptAbort = undefined;
 		activeTopicRequests.clear();
-		ctx.ui.setStatus("session-topic", undefined);
+		ctx.ui.setStatus(SESSION_TOPIC_STATUS_KEY, undefined);
 		ctx.ui.setWidget(PROMPT_WIDGET, undefined);
 	});
 

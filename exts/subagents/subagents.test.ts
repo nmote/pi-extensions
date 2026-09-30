@@ -162,7 +162,7 @@ try {
 		const footer: Array<{ key: string; value: string | undefined }> = [];
 		const ctx = { ...context({ setStatus: (key, value) => footer.push({ key, value }) }), cwd: process.cwd(), mode: "json", model: { provider: "fake", id: "fake-model" }, thinkingLevel: "off" };
 		beginSession(ctx as unknown as ExtensionContext);
-		check("empty session omits the subagent footer", footer.at(-1)?.key === "backlog-subagents" && footer.at(-1)?.value === undefined);
+		check("empty session omits the subagent footer", footer.at(-1)?.key === "000-pi-04-subagents" && footer.at(-1)?.value === undefined);
 		check("catalog is a read-only tool with no parameters", !!list && Object.keys(list.parameters.properties).length === 0);
 		check("spawn prompt omits named agent names", !spawn.description.includes("correctness-reviewer"));
 		const general = await spawn.execute("general", { task: "done general" }, undefined, undefined, ctx);

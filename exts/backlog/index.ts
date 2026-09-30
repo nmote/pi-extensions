@@ -1,3 +1,4 @@
+import { BACKLOG_STATUS_KEY } from "../shared/footer-status.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	DEFAULT_MAX_BYTES,
@@ -26,8 +27,6 @@ import {
 import { openBacklogGraph } from "./graph.ts";
 import { abbreviateHome } from "./repo.ts";
 import { BACKLOG_STATUSES, BacklogStore, backlogDir, isItemId } from "./store.ts";
-
-const STATUS_KEY = "backlog";
 
 const operationSchema = Type.Object(
 	{
@@ -101,9 +100,9 @@ export default function backlog(pi: ExtensionAPI): void {
 		if (!ctx.hasUI) return;
 		try {
 			const summary = statusSummary(await store.load(), currentRepo(operationContext(ctx)));
-			ctx.ui.setStatus(STATUS_KEY, summary ? ctx.ui.theme.fg("dim", `[backlog: ${summary}]`) : undefined);
+			ctx.ui.setStatus(BACKLOG_STATUS_KEY, summary ? ctx.ui.theme.fg("dim", `[backlog: ${summary}]`) : undefined);
 		} catch {
-			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", "[backlog: unreadable]"));
+			ctx.ui.setStatus(BACKLOG_STATUS_KEY, ctx.ui.theme.fg("warning", "[backlog: unreadable]"));
 		}
 	}
 

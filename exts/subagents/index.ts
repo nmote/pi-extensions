@@ -1,3 +1,4 @@
+import { SUBAGENTS_STATUS_KEY } from "../shared/footer-status.ts";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	type AgentToolResult,
@@ -48,8 +49,6 @@ import {
 	progressText,
 } from "./status.ts";
 
-// Footer keys sort alphabetically; keep this after backlog.
-const STATUS_KEY = "backlog-subagents";
 const MAX_PARALLEL_TASKS = 8;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -247,7 +246,7 @@ export default function subagents(pi: ExtensionAPI): void {
 	let statusContext: ExtensionContext | undefined;
 	function refreshStatus(count: number): void {
 		if (!statusContext?.hasUI) return;
-		statusContext.ui.setStatus(STATUS_KEY, count ? statusContext.ui.theme.fg("dim", `[subagents: ${count} live]`) : undefined);
+		statusContext.ui.setStatus(SUBAGENTS_STATUS_KEY, count ? statusContext.ui.theme.fg("dim", `[subagents: ${count} live]`) : undefined);
 	}
 	const manager = new SubagentManager({
 		onLiveCountChange: refreshStatus,

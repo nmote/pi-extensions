@@ -26,6 +26,7 @@
  * Config: ~/.pi/agent/extensions/auto-approve.json (global only).
  */
 
+import { AUTO_APPROVE_STATUS_KEY, AUTO_APPROVE_EVAL_STATUS_KEY } from "../shared/footer-status.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -148,7 +149,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 
 	function updateStatus(ctx: ExtensionContext): void {
 		const color = mode === "yolo" ? "error" : mode === "auto" ? "accent" : "warning";
-		ctx.ui.setStatus("auto-approve", ctx.ui.theme.fg(color, `[${modeLabel(mode)}]`));
+		ctx.ui.setStatus(AUTO_APPROVE_STATUS_KEY, ctx.ui.theme.fg(color, `[${modeLabel(mode)}]`));
 		if (mode === "yolo") {
 			ctx.ui.setWidget("auto-approve", [
 				ctx.ui.theme.fg("error", "☠️  YOLO MODE — tool calls auto-approved (deny list still blocks)"),
@@ -484,11 +485,11 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			}
 
 			const effort = config.evaluator.reasoningEffort;
-			ctx.ui.setStatus("auto-approve-eval", ctx.ui.theme.fg("muted", "[evaluating…]"));
+			ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 			try {
 				result = await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, instructions);
 			} finally {
-				ctx.ui.setStatus("auto-approve-eval", undefined);
+				ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
 			}
 
 			if (config.evaluator.memoize && config.evaluator.reasoningEffort === effort) {
@@ -594,12 +595,12 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					return;
 				}
 				const instructions = evaluatorInstructions(buildMatchInput(call.toolName, call.input), ctx.cwd);
-				ctx.ui.setStatus("auto-approve-eval", ctx.ui.theme.fg("muted", "[evaluating…]"));
+				ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 				let result: Awaited<ReturnType<typeof evaluateSafety>>;
 				try {
 					result = await evaluateSafety(model, ctx, call.toolName, call.input, config.evaluator, instructions);
 				} finally {
-					ctx.ui.setStatus("auto-approve-eval", undefined);
+					ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
 				}
 				ctx.ui.notify(`Evaluator verdict (${call.toolName}): ${result.decision.toUpperCase()}\n${result.reason}`, "info");
 				return;
