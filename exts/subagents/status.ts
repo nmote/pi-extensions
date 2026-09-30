@@ -1,7 +1,7 @@
 import type { SubagentSnapshot, SubagentStatus } from "./manager.ts";
 
-const STATUS_ORDER: SubagentStatus[] = ["starting", "running", "waiting", "completed", "failed", "cancelled"];
-const TERMINAL_STATUSES = new Set<SubagentStatus>(["completed", "failed", "cancelled"]);
+const STATUS_ORDER: SubagentStatus[] = ["starting", "running", "waiting", "idle", "completed", "failed", "cancelled"];
+const TERMINAL_STATUSES = new Set<SubagentStatus>(["idle", "completed", "failed", "cancelled"]);
 
 export function formatDuration(milliseconds: number): string {
 	const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
@@ -25,6 +25,7 @@ export function statusIcon(status: SubagentStatus): string {
 		starting: "◐",
 		running: "◐",
 		waiting: "?",
+		idle: "✓",
 		completed: "✓",
 		failed: "✗",
 		cancelled: "×",
@@ -32,7 +33,7 @@ export function statusIcon(status: SubagentStatus): string {
 }
 
 export function formatElapsedTime(result: SubagentSnapshot, now = Date.now()): string {
-	const end = TERMINAL_STATUSES.has(result.status) ? result.updatedAt : now;
+	const end = result.taskEndedAt ?? (TERMINAL_STATUSES.has(result.status) ? result.updatedAt : now);
 	return formatDuration(end - result.startedAt);
 }
 
@@ -46,21 +47,24 @@ function formatModel(result: SubagentSnapshot): string {
 
 export function formatResultHeading(result: SubagentSnapshot): string {
 	const status = result.status === "waiting" ? "waiting for supervisor" : result.status;
-	return `### ${result.agent} (${result.id}) — ${status} · ${formatCost(result)}`;
+	return `### ${result.agent} (${result.id}) — task ${result.taskNumber ?? 1} · ${status} · ${formatCost(result)}`;
 }
 
 export function formatExpandedMetadata(result: SubagentSnapshot): string {
 	return [
+		`- Task ${result.taskNumber ?? 1}: ${result.task}`,
 		`- Phase: ${result.phase}`,
 		`- Elapsed: ${formatElapsedTime(result)}`,
-		`- Cost: ${formatCost(result)}`,
+		`- Tokens: ${result.usage.totalTokens} this task / ${(result.totalUsage ?? result.usage).totalTokens} lifetime`,
+		`- Task cost: ${formatCost(result)}`,
+		`- Lifetime cost: $${(result.totalUsage ?? result.usage).cost.total.toFixed(3)}`,
 		`- Model: ${formatModel(result)}`,
 		`- Working directory: ${result.cwd}`,
 	].join("\n");
 }
 
 export function formatRunStatus(result: SubagentSnapshot, now = Date.now()): string {
-	return `${statusIcon(result.status)} ${result.agent} ${result.id} · ${formatModel(result)} · ${formatElapsedTime(result, now)} · ${formatCost(result)} · ${result.phase}`;
+	return `${statusIcon(result.status)} ${result.agent} ${result.id} · task ${result.taskNumber ?? 1} · ${formatModel(result)} · ${formatElapsedTime(result, now)} · ${formatCost(result)} · ${result.phase}`;
 }
 
 export function formatActivity(result: SubagentSnapshot): string {

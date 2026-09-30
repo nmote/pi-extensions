@@ -3,11 +3,17 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	AUTO_APPROVE_STAT_CHANNEL,
+	AUTO_APPROVE_STATE_CHANNEL,
+	AUTO_APPROVE_TASK_CHANNEL,
 	parseAutoApproveStat,
 	SUBAGENT_TOKEN_ENV,
+	SUBAGENT_RUN_ID_ENV,
+	SUBAGENT_TASK_COMMAND,
+	taskPolicyAck,
 } from "../shared/subagent-protocol.ts";
 import { saveEvaluatorEffort } from "./config.ts";
 import autoApprove from "./index.ts";
+import subagents from "../subagents/index.ts";
 import { scopeInstruction } from "./rules.ts";
 
 let failures = 0;
@@ -385,6 +391,57 @@ async function main(): Promise<void> {
 			await evaluated("write", { path: "escdir/new.txt", content: "" }),
 		);
 		check("write through a dangling symlink is evaluated", await evaluated("write", { path: "dangling", content: "" }));
+
+		process.env[SUBAGENT_TOKEN_ENV] = "child-token";
+		const previousRunId = process.env[SUBAGENT_RUN_ID_ENV];
+		try {
+			process.env[SUBAGENT_RUN_ID_ENV] = "child-id";
+			subagents(pi as any);
+		} finally {
+			if (previousRunId === undefined) delete process.env[SUBAGENT_RUN_ID_ENV];
+			else process.env[SUBAGENT_RUN_ID_ENV] = previousRunId;
+		}
+		check("standby children disable cache warming", handlers.get("cache_warming_decision")?.[0]?.({}, ctx)?.action === "stop");
+		const noticesBeforePolicy = notices.length;
+		await commands.get(SUBAGENT_TASK_COMMAND).handler("child-token yolo", { ...ctx, mode: "rpc" });
+		check("child policy update emits only its internal acknowledgement", notices.length === noticesBeforePolicy + 1 && notices.at(-1) === taskPolicyAck("child-token", "yolo"));
+		await commands.get("auto").handler("manual", ctx);
+		check("explicit mode changes still announce", notices.at(-1) === "Auto-approve mode: ✋ manual");
+		let acknowledged = false;
+		const beginTask = (mode: string, token = "child-token") => {
+			acknowledged = false;
+			pi.events.emit(AUTO_APPROVE_TASK_CHANNEL, { token, mode, ctx, respond: () => { acknowledged = true; } });
+		};
+		const currentMode = () => {
+			let mode: string | undefined;
+			pi.events.emit(AUTO_APPROVE_STATE_CHANNEL, { respond: (state: { mode: string }) => { mode = state.mode; } });
+			return mode;
+		};
+		beginTask("yolo");
+		check("managed task synchronizes approval mode", acknowledged && currentMode() === "yolo");
+		beginTask("manual", "wrong-token");
+		check("policy update rejects wrong child token", !acknowledged && currentMode() === "yolo");
+		beginTask("manual");
+		selection = "Approve (always this exact call this session)";
+		const rememberedCall = { toolName: "bash", input: { command: "remembered-across-tasks" } };
+		await gate(rememberedCall, ctx);
+		beginTask("manual");
+		selection = "Deny";
+		check("always-allow survives task boundaries", (await gate({ ...rememberedCall, input: { ...rememberedCall.input } }, ctx)) === undefined);
+
+		beginTask("auto");
+		evaluatorResponse = { stopReason: "stop", content: [{ type: "text", text: '{"decision":"review","reason":"needs approval"}' }] };
+		const oneShotCall = { toolName: "bash", input: { command: "one-shot-task-boundary" } };
+		const rejected = await gate(oneShotCall, ctx);
+		const oneShotId = /requestId "([^"]+)"/.exec(rejected.reason)?.[1];
+		selection = "Approve once";
+		await approvalTool.execute("task-once", { requestId: oneShotId, justification: "needed" }, undefined, undefined, ctx);
+		const pendingCall = await gate({ toolName: "bash", input: { command: "pending-task-boundary" } }, ctx);
+		const pendingId = /requestId "([^"]+)"/.exec(pendingCall.reason)?.[1];
+		beginTask("auto");
+		check("one-shot allowance expires at task boundary", (await gate(oneShotCall, ctx))?.block === true);
+		const expired = await approvalTool.execute("old-task", { requestId: pendingId, justification: "needed" }, undefined, undefined, ctx);
+		check("old task approval requests expire", expired.content[0].text.includes("invalid or expired"));
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

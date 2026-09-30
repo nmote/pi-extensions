@@ -1,5 +1,11 @@
 const token = process.env.PI_SUBAGENT_TOKEN;
 let pending;
+let mode;
+let acknowledgePolicy = true;
+let slowDiscovery = false;
+let slowPolicy = false;
+let straySettlement = false;
+const history = [];
 
 function send(value) {
 	process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -35,6 +41,7 @@ function assistant(text, stopReason = "stop") {
 }
 
 function finish(text) {
+	history.push({ role: "assistant", text });
 	send({ type: "message_end", message: assistant(text) });
 	send({ type: "agent_settled" });
 }
@@ -45,13 +52,67 @@ function processLine(line) {
 		send({ id: command.id, type: "response", command: "get_state", success: true, data: { model: { provider: "fake", id: "fake-model" } } });
 		return;
 	}
+	if (command.type === "get_commands") {
+		const respond = () => send({ id: command.id, type: "response", command: "get_commands", success: true, data: { commands: [{ name: "_subagent-task" }] } });
+		if (slowDiscovery) {
+			send({ type: "extension_ui_request", id: "discovery-pause", method: "notify", message: "discovering task policy" });
+			setTimeout(respond, 25);
+		} else respond();
+		return;
+	}
 	if (command.type === "prompt") {
-		send({ id: command.id, type: "response", command: "prompt", success: true });
+		if (command.message.startsWith("/_subagent-task ")) {
+			const [, suppliedToken, requestedMode] = command.message.split(" ");
+			const respond = () => {
+				if (straySettlement) send({ type: "agent_settled" });
+				if (acknowledgePolicy && suppliedToken === token) {
+					mode = requestedMode;
+					send({ type: "extension_ui_request", id: "policy-ack", method: "notify", message: `[[pi-subagent-task-policy:${token}]]${mode}` });
+				}
+				send({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "handled" } });
+			};
+			if (slowPolicy) {
+				send({ type: "extension_ui_request", id: "policy-pause", method: "notify", message: "updating task policy" });
+				setTimeout(respond, 50);
+			} else respond();
+			return;
+		}
+		if (command.message.includes("slow discovery")) slowDiscovery = true;
+		if (command.message.includes("slow policy")) slowPolicy = true;
+		if (command.message.includes("stray settlement")) straySettlement = true;
+		history.push({ role: "user", text: command.message });
+		send({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "started" } });
 		send({ type: "agent_start" });
 		send({ type: "turn_start" });
 		send({ type: "message_start", message: assistant("") });
 		send({ type: "message_update", message: assistant(""), assistantMessageEvent: { type: "thinking_start" } });
 		if (command.message.startsWith("Task: hang")) return;
+		if (command.message.startsWith("Task: recall")) {
+			finish(JSON.stringify({ pid: process.pid, history, cwd: process.cwd(), args: process.argv.slice(2), mode }));
+			return;
+		}
+		if (command.message.startsWith("Task: unsolicited idle")) {
+			finish("will start unassigned work");
+			setTimeout(() => send({ type: "agent_start" }), 25);
+			return;
+		}
+		if (command.message.startsWith("Task: crash idle")) {
+			finish("will exit");
+			setTimeout(() => process.exit(1), 25);
+			return;
+		}
+		if (command.message.startsWith("Task: compact")) {
+			send({ type: "compaction_start", reason: "threshold" });
+			send({ type: "compaction_end", result: { usage: assistant("").usage }, aborted: false });
+			finish("compacted");
+			return;
+		}
+		if (command.message.startsWith("Task: fail")) {
+			send({ type: "message_end", message: assistant("failure", "error") });
+			send({ type: "agent_settled" });
+			return;
+		}
+		if (command.message.startsWith("Task: no policy")) acknowledgePolicy = false;
 		if (command.message.startsWith("Task: cwd")) {
 			finish(process.cwd());
 			return;

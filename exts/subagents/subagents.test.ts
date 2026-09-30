@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
@@ -47,11 +48,14 @@ function context(options: {
 	select?: (title: string, choices: string[]) => Promise<string | undefined>;
 	confirm?: (title: string, message: string) => Promise<boolean>;
 	notify?: (message: string) => void;
+	setStatus?: (key: string, value: string | undefined) => void;
 } = {}) {
 	return {
 		hasUI: options.hasUI ?? true,
 		signal: undefined,
 		ui: {
+			theme: { fg: (_color: string, text: string) => text },
+			setStatus: options.setStatus ?? (() => {}),
 			select: options.select ?? (async () => "Approve once"),
 			confirm: options.confirm ?? (async () => true),
 			input: async () => "input",
@@ -84,10 +88,11 @@ async function errorMessage(promise: Promise<unknown>): Promise<string> {
 }
 
 const managers: SubagentManager[] = [];
-const makeManager = (onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void) => {
+const makeManager = (onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void, onLiveCountChange?: (count: number) => void) => {
 	const manager = new SubagentManager({
 		invocation: { command: process.execPath, argsPrefix: [fixture] },
 		onAutoApproveStat,
+		onLiveCountChange,
 	});
 	managers.push(manager);
 	return manager;
@@ -126,14 +131,19 @@ try {
 	const register = () => {
 		const tools = new Map<string, any>();
 		let beginTurn = () => {};
+		let beginSession = (_ctx: ExtensionContext) => {};
+		let approvalMode = "yolo";
 		const pi = {
 			registerTool(tool: any) { tools.set(tool.name, tool); },
 			registerCommand() {},
-			on(event: string, handler: () => Promise<void>) {
+			on(event: string, handler: (...args: any[]) => any) {
+				if (event === "session_start") beginSession = (ctx) => handler({}, ctx);
 				if (event === "session_shutdown") shutdowns.push(handler);
 				if (event === "turn_start") beginTurn = handler;
 			},
-			events: { emit() {} },
+			events: { emit(name: string, request: any) {
+				if (name === "auto-approve:get-state") request.respond({ mode: approvalMode });
+			} },
 		};
 		const originalScript = process.argv[1];
 		try {
@@ -142,18 +152,29 @@ try {
 		} finally {
 			process.argv[1] = originalScript;
 		}
-		return { tools, beginTurn: () => beginTurn() };
+		return { tools, beginSession, beginTurn: () => beginTurn(), setMode: (mode: string) => { approvalMode = mode; } };
 	};
 	try {
-		const { tools, beginTurn } = register();
+		const { tools, beginSession, beginTurn, setMode } = register();
 		beginTurn();
 		const spawn = tools.get("subagent");
 		const list = tools.get("list_subagents");
-		const ctx = { ...context(), cwd: process.cwd(), mode: "json", model: { provider: "fake", id: "fake-model" }, thinkingLevel: "off" };
+		const footer: Array<{ key: string; value: string | undefined }> = [];
+		const ctx = { ...context({ setStatus: (key, value) => footer.push({ key, value }) }), cwd: process.cwd(), mode: "json", model: { provider: "fake", id: "fake-model" }, thinkingLevel: "off" };
+		beginSession(ctx as unknown as ExtensionContext);
+		check("empty session omits the subagent footer", footer.at(-1)?.key === "backlog-subagents" && footer.at(-1)?.value === undefined);
 		check("catalog is a read-only tool with no parameters", !!list && Object.keys(list.parameters.properties).length === 0);
 		check("spawn prompt omits named agent names", !spawn.description.includes("correctness-reviewer"));
 		const general = await spawn.execute("general", { task: "done general" }, undefined, undefined, ctx);
 		check("general delegation works before catalog lookup", general.details.results[0]?.agent === "general" && general.details.results[0]?.output === "done");
+		check("idle child remains in the persistent footer", footer.at(-1)?.value === "subagents: 1 live");
+		const footerUpdatesBeforeContinuation = footer.length;
+		setMode("manual");
+		const continued = await tools.get("subagent_continue").execute("continue", { id: general.details.results[0].id, task: "recall" }, undefined, undefined, ctx);
+		const recalled = JSON.parse(continued.details.results[0].output);
+		check("continuation does not duplicate the live count", footer.length === footerUpdatesBeforeContinuation && footer.at(-1)?.value === "subagents: 1 live");
+		check("follow-up tool inherits current mode and reports only new usage", recalled.mode === "manual" && continued.usage.totalTokens === 18 && continued.details.results[0].totalUsage.totalTokens === 36);
+		check("idle result explains reuse and ending", continued.content[0].text.includes("subagent_continue") && continued.content[0].text.includes("subagent_cancel") && continued.content[0].text.includes("36 tokens / $0.066 lifetime"));
 		const namedError = await errorMessage(spawn.execute("named", { task: "done named", agent: "correctness-reviewer" }, undefined, undefined, ctx));
 		const batchError = await errorMessage(spawn.execute("batch", { tasks: [
 			{ task: "done general" }, { task: "done named", agent: "correctness-reviewer" },
@@ -172,6 +193,11 @@ try {
 			{ task: "done plain" }, { task: "done named", agent: "correctness-reviewer" },
 		] }, undefined, undefined, ctx);
 		check("mixed batches succeed after catalog lookup", mixed.details.results.map((result: { agent: string; output?: string }) => `${result.agent}:${result.output}`).join(",") === "general:done,correctness-reviewer:done");
+		check("parallel children are counted in the footer", footer.at(-1)?.value === "subagents: 4 live");
+		await tools.get("subagent_cancel").execute("end-one", { id: general.details.results[0].id });
+		check("ending a child decrements the footer", footer.at(-1)?.value === "subagents: 3 live");
+		await tools.get("subagent_cancel").execute("end-all", {});
+		check("ending all children omits the footer", footer.at(-1)?.value === undefined);
 		const { tools: anotherRuntime, beginTurn: beginNewTurn } = register();
 		beginNewTurn();
 		const resetError = await errorMessage(anotherRuntime.get("subagent").execute("reset", { task: "done named", agent: "correctness-reviewer" }, undefined, undefined, ctx));
@@ -257,13 +283,107 @@ try {
 		}),
 	);
 	check("canonical aliases of the parent cwd need no approval", sameDirectoryApprovalCalls === 0);
-	check("single task completes", simpleResults[0]?.status === "completed");
+	check("single task completes", simpleResults[0]?.status === "idle");
 	check("single task returns final output", simpleResults[0]?.output === "done");
 	check("run records lifecycle activity", simpleResults[0]?.activity.some((entry) => entry.message === "model thinking"));
 	check("duration formatter is concise", formatDuration(65_000) === "1m 5s");
 	const firstUsage = simple.consumeUsage([simpleResults[0].id]);
 	check("usage is reported", firstUsage.totalTokens === 18 && firstUsage.cost.total === 0.033);
 	check("usage is reported once", simple.consumeUsage([simpleResults[0].id]).totalTokens === 0);
+
+	const liveCounts: number[] = [];
+	const reusable = makeManager(undefined, (count) => liveCounts.push(count));
+	const firstTask = (await reusable.start([task("recall first secret")], process.cwd(), context()))[0]!;
+	const firstRecall = JSON.parse(firstTask.output!);
+	reusable.consumeUsage([firstTask.id]);
+	const secondTask = await reusable.continue(firstTask.id, "recall second", () => "manual", context());
+	const secondRecall = JSON.parse(secondTask.output!);
+	check("follow-up retains user and assistant context in the same child", firstRecall.pid === secondRecall.pid && secondRecall.history.some((entry: any) => entry.text === "Task: recall first secret") && secondRecall.history.some((entry: any) => entry.role === "assistant" && entry.text === firstTask.output));
+	check("follow-up keeps its identity and launch configuration", secondTask.id === firstTask.id && secondTask.taskNumber === 2 && secondTask.task === "recall second" && secondRecall.cwd === firstRecall.cwd && JSON.stringify(secondRecall.args) === JSON.stringify(firstRecall.args));
+	check("task reporting resets without changing earlier snapshots", secondTask.usage.totalTokens === 18 && secondTask.totalUsage.totalTokens === 36 && firstTask.totalUsage.totalTokens === 18 && secondTask.activity.every((entry) => entry.at >= secondTask.startedAt));
+	check("follow-up usage is accounted once", reusable.consumeUsage([firstTask.id]).totalTokens === 18 && reusable.consumeUsage([firstTask.id]).totalTokens === 0);
+	const wrongReply = await errorMessage(reusable.reply(firstTask.id, "invalid", context()));
+	const unknownContinue = await errorMessage(reusable.continue("missing", "work", () => "manual", context()));
+	check("idle reply and unknown continuation fail clearly", wrongReply.includes("not waiting") && unknownContinue.includes("Unknown subagent"));
+
+	const followupQuestion = await reusable.continue(firstTask.id, "ask again", () => "auto", context());
+	check("waiting child is live without a count change", reusable.liveCount() === 1 && liveCounts.join(",") === "1");
+	check("follow-up can pause for supervision without stale output", followupQuestion.status === "waiting" && followupQuestion.question?.question === "Which option?" && followupQuestion.output === undefined);
+	const waitingContinue = await errorMessage(reusable.continue(firstTask.id, "wrong", () => "auto", context()));
+	const followupAnswer = await reusable.reply(firstTask.id, "two", context());
+	check("waiting agent accepts only a reply within the same task", waitingContinue.includes("while waiting") && followupAnswer.status === "idle" && followupAnswer.taskNumber === 3 && followupAnswer.output === "answer: two" && followupAnswer.usage.totalTokens === 36);
+	let followupApprovals = 0;
+	const followupApproval = await reusable.continue(firstTask.id, "approval again", () => "manual", context({ select: async () => { followupApprovals++; return "Deny"; } }));
+	check("follow-up approvals use fresh parent UI", followupApprovals === 1 && followupApproval.status === "idle" && followupApproval.output === "user decision: Deny");
+
+	const compacted = await reusable.continue(firstTask.id, "compact", () => "manual", context());
+	check("task usage includes context compaction", compacted.usage.totalTokens === 36 && compacted.activity.some((entry) => entry.message === "compacting context"));
+
+	const followupAbort = new AbortController();
+	const busy = reusable.continue(firstTask.id, "hang", () => "manual", context(), undefined, followupAbort.signal);
+	const busyContinue = await errorMessage(reusable.continue(firstTask.id, "wrong", () => "manual", context()));
+	followupAbort.abort();
+	check("simultaneous assignment rejects without replacing active task", busyContinue.includes("while running") && (await busy).status === "cancelled");
+	check("active cancellation removes the live count", reusable.liveCount() === 0 && liveCounts.join(",") === "1,0");
+	check("ended child cannot be reused", (await errorMessage(reusable.continue(firstTask.id, "wrong", () => "manual", context()))).includes("while cancelled"));
+
+	const failedAgent = makeManager();
+	const failedTask = (await failedAgent.start([task("fail")], process.cwd(), context()))[0]!;
+	check("failed child cannot be reused", failedTask.status === "failed" && (await errorMessage(failedAgent.continue(failedTask.id, "wrong", () => "manual", context()))).includes("while failed"));
+	const missingPolicy = makeManager();
+	const policyTask = (await missingPolicy.start([task("no policy")], process.cwd(), context()))[0]!;
+	const noAck = await missingPolicy.continue(policyTask.id, "recall", () => "manual", context());
+	check("missing policy acknowledgement fails closed", noAck.status === "failed" && !!noAck.error?.includes("not acknowledged") && noAck.output === undefined);
+
+	const delayed = makeManager();
+	const delayedTask = (await delayed.start([task("recall slow discovery")], process.cwd(), context()))[0]!;
+	let latestMode = "yolo";
+	const latestPolicy = await delayed.continue(delayedTask.id, "recall", () => latestMode, context({ notify: (message) => { if (message.includes("discovering task policy")) latestMode = "manual"; } }));
+	check("policy getter observes mode changes during preparation", JSON.parse(latestPolicy.output!).mode === "manual");
+
+	const interrupted = makeManager();
+	const interruptedTask = (await interrupted.start([task("recall slow policy")], process.cwd(), context()))[0]!;
+	const handshakeAbort = new AbortController();
+	const interruptedResult = await interrupted.continue(interruptedTask.id, "recall", () => "manual", context({ notify: (message) => { if (message.includes("updating task policy")) handshakeAbort.abort(); } }), undefined, handshakeAbort.signal);
+	check("abort during policy handshake cannot start the task", interruptedResult.status === "cancelled" && interruptedResult.output === undefined && interruptedResult.usage.totalTokens === 0);
+
+	const stray = makeManager();
+	const strayTask = (await stray.start([task("recall stray settlement")], process.cwd(), context()))[0]!;
+	const strayResult = await stray.continue(strayTask.id, "recall", () => "manual", context());
+	check("stray settlement during handshake fails instead of resolving a task early", strayResult.status === "failed" && strayResult.output === undefined && !!strayResult.error?.includes("outside an assigned task"));
+
+	const unsolicited = makeManager();
+	const unsolicitedTask = (await unsolicited.start([task("unsolicited idle")], process.cwd(), context()))[0]!;
+	for (let attempt = 0; attempt < 100 && unsolicited.status(unsolicitedTask.id)[0]?.status === "idle"; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	check("unsolicited work while idle fails and stops the child", unsolicited.status(unsolicitedTask.id)[0]?.status === "failed" && !!unsolicited.status(unsolicitedTask.id)[0]?.error?.includes("outside an assigned task"));
+
+	const crashCounts: number[] = [];
+	const idleCrash = makeManager(undefined, (count) => crashCounts.push(count));
+	const crashingTask = (await idleCrash.start([task("crash idle")], process.cwd(), context()))[0]!;
+	for (let attempt = 0; attempt < 100 && idleCrash.status(crashingTask.id)[0]?.status === "idle"; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	check("idle process exit is visible as failure", idleCrash.status(crashingTask.id)[0]?.status === "failed");
+	check("idle crash removes the live count without a tool call", idleCrash.liveCount() === 0 && crashCounts.join(",") === "1,0");
+
+	const cleanup = makeManager();
+	const cleanupTasks = await cleanup.start([task("recall one"), task("recall two")], process.cwd(), context());
+	const childInfo = cleanupTasks.map((result) => JSON.parse(result.output!));
+	const ended = await cleanup.cancel(cleanupTasks[0]!.id);
+	const childStopped = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+	const promptPath = (info: any) => info.args[info.args.indexOf("--append-system-prompt") + 1];
+	check("ending idle child releases process and prompt", ended[0]?.status === "cancelled" && childStopped(childInfo[0].pid) && !existsSync(promptPath(childInfo[0])));
+	check("ending standby preserves completed-task timing", ended[0]?.taskEndedAt === cleanupTasks[0]?.taskEndedAt);
+	const endedAll = await cleanup.cancel();
+	check("cancel-all includes idle children", endedAll.length === 1 && endedAll[0]?.status === "cancelled" && childStopped(childInfo[1].pid) && !existsSync(promptPath(childInfo[1])));
+	const shutdown = makeManager();
+	const shutdownTask = (await shutdown.start([task("recall shutdown")], process.cwd(), context()))[0]!;
+	const shutdownInfo = JSON.parse(shutdownTask.output!);
+	await shutdown.shutdown();
+	await shutdown.shutdown();
+	check("shutdown disposes standby resources idempotently", childStopped(shutdownInfo.pid) && !existsSync(promptPath(shutdownInfo)) && shutdown.status().length === 0);
 
 	const toolActivity = makeManager();
 	const toolActivityResult = await toolActivity.start([task("tool")], process.cwd(), context());
@@ -277,6 +397,7 @@ try {
 		...toolRun,
 		status: "running" as const,
 		phase: "model thinking",
+		taskEndedAt: undefined,
 		startedAt: Date.now() - 65_000,
 	};
 	check(
@@ -293,11 +414,11 @@ try {
 			formatCost(withCost(0.03)) === "$0.030" &&
 			formatCost(withCost(0.0326)) === "$0.033",
 	);
-	check("expanded metadata includes cost", formatExpandedMetadata(withCost(0.0326)).includes("- Cost: $0.033"));
+	check("expanded metadata includes cost", formatExpandedMetadata(withCost(0.0326)).includes("- Task cost: $0.033"));
 	const completedResult = {
 		...liveResult,
-		status: "completed" as const,
-		phase: "completed",
+		status: "idle" as const,
+		phase: "idle",
 		updatedAt: liveResult.startedAt + 65_000,
 	};
 	const firstCompletedStatus = formatRunStatus(completedResult, liveResult.startedAt + 70_000);
@@ -365,6 +486,8 @@ try {
 	check("working directories expand home paths", crossRepositoryResult[0]?.cwd === canonicalHome);
 	check("cross-directory children run in the approved canonical cwd", crossRepositoryResult[0]?.output === canonicalHome);
 	check("cross-directory runs require explicit user approval", workingDirectoryApprovalCalls === 1);
+	const crossDirectoryFollowup = await crossRepository.continue(crossRepositoryResult[0]!.id, "cwd follow-up", () => "manual", context({ confirm: async () => { workingDirectoryApprovalCalls++; return false; } }));
+	check("approved cwd is reused without another approval", crossDirectoryFollowup.output === canonicalHome && workingDirectoryApprovalCalls === 1);
 	check(
 		"working-directory approval identifies the parent, child directory, and grouped task",
 		workingDirectoryApprovalTitle.includes("approval required") &&
@@ -471,7 +594,7 @@ try {
 	check("supervisor question does not open user approval UI", supervisorUiCalls === 0);
 	check("stats before a supervisor checkpoint are forwarded", supervisedStats.join(",") === "evaluatorAllows");
 	const resumed = await supervised.reply(waiting[0].id, "two", context());
-	check("reply resumes existing child", resumed.status === "completed" && resumed.output === "answer: two");
+	check("reply resumes existing child", resumed.status === "idle" && resumed.output === "answer: two");
 	check("reply does not replay forwarded stats", supervisedStats.join(",") === "evaluatorAllows");
 	check(
 		"reply status includes cost accumulated across checkpoints",
@@ -480,7 +603,7 @@ try {
 	check(
 		"result headings include cost at each checkpoint",
 		formatResultHeading(waiting[0]).endsWith("waiting for supervisor · $0.033") &&
-			formatResultHeading(resumed).endsWith("completed · $0.066"),
+			formatResultHeading(resumed).endsWith("idle · $0.066"),
 	);
 
 	const approvalStats: AutoApproveStat[] = [];
@@ -505,7 +628,7 @@ try {
 		"approval UI identifies the subagent and cwd",
 		approvalTitle.includes("approval required") && approvalTitle.includes(approved[0].id) && approvalTitle.includes(process.cwd()),
 	);
-	check("approval request never becomes a supervisor checkpoint", approved[0]?.status === "completed");
+	check("approval request never becomes a supervisor checkpoint", approved[0]?.status === "idle");
 	check("approval wait is visible without exposing it to the supervisor", approved[0]?.activity.some((entry) => entry.message === "waiting for user approval"));
 	check("user approval response returns only to child", approved[0]?.output === "user decision: Approve once");
 	check(
@@ -592,7 +715,7 @@ try {
 	);
 	check(
 		"malformed child notifications do not fail the run",
-		malformedNotificationResult[0]?.status === "completed" && malformedNotificationCalls === 0,
+		malformedNotificationResult[0]?.status === "idle" && malformedNotificationCalls === 0,
 	);
 
 	const otherGate = makeManager();
@@ -603,15 +726,15 @@ try {
 		context({ select: async () => { otherGateCalls++; return "Deny"; } }),
 	);
 	check("unmarked extension dialogs also go directly to user UI", otherGateCalls === 1);
-	check("unmarked command approval is not a supervisor checkpoint", otherGateResult[0]?.status === "completed");
+	check("unmarked command approval is not a supervisor checkpoint", otherGateResult[0]?.status === "idle");
 
 	const headless = makeManager();
 	const denied = await headless.start([task("approval")], process.cwd(), context({ hasUI: false }));
-	check("headless approval is cancelled instead of sent to supervisor", denied[0]?.status === "completed" && denied[0]?.output === "user decision: cancelled");
+	check("headless approval is cancelled instead of sent to supervisor", denied[0]?.status === "idle" && denied[0]?.output === "user decision: cancelled");
 
 	const parallel = makeManager();
 	const parallelResults = await parallel.start([task("done one"), task("done two"), task("done three"), task("done four"), task("done five")], process.cwd(), context());
-	check("five tasks run as one concurrent batch", parallelResults.length === 5 && parallelResults.every((result) => result.status === "completed"));
+	check("five tasks run as one concurrent batch", parallelResults.length === 5 && parallelResults.every((result) => result.status === "idle"));
 
 	const parallelApprovalStats: AutoApproveStat[] = [];
 	const parallelApprovals = makeManager((stat) => parallelApprovalStats.push(stat));
@@ -623,7 +746,7 @@ try {
 	const statCount = (stat: AutoApproveStat) => parallelApprovalStats.filter((candidate) => candidate === stat).length;
 	check(
 		"parallel child approval stats are aggregated independently",
-		parallelApprovalResults.every((result) => result.status === "completed") &&
+		parallelApprovalResults.every((result) => result.status === "idle") &&
 			statCount("softRejections") === 2 &&
 			statCount("escalations") === 2 &&
 			statCount("humanApprovals") === 2,

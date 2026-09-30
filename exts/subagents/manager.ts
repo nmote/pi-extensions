@@ -9,6 +9,8 @@ import {
 	isQuestionTitle,
 	parseApprovalTitle,
 	parseAutoApproveStat,
+	SUBAGENT_TASK_COMMAND,
+	taskPolicyAck,
 	SUBAGENT_RUN_ID_ENV,
 	SUBAGENT_TOKEN_ENV,
 } from "../shared/subagent-protocol.ts";
@@ -26,7 +28,8 @@ const SESSION_ENV_VARS = new Set([
 	"PI_REASONING_LEVEL",
 ]);
 
-export type SubagentStatus = "starting" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+// Completed is retained for historical tool results.
+export type SubagentStatus = "starting" | "running" | "waiting" | "idle" | "completed" | "failed" | "cancelled";
 
 export interface SubagentActivity {
 	at: number;
@@ -58,18 +61,21 @@ export interface SubagentSnapshot {
 	id: string;
 	agent: string;
 	task: string;
+	taskNumber: number;
 	cwd: string;
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	status: SubagentStatus;
 	phase: string;
 	startedAt: number;
+	taskEndedAt?: number;
 	updatedAt: number;
 	question?: SupervisorQuestion;
 	output?: string;
 	error?: string;
 	activity: SubagentActivity[];
 	usage: UsageTotals;
+	totalUsage: UsageTotals;
 }
 
 interface OperationHooks {
@@ -218,16 +224,23 @@ class SubagentRun {
 	private promptDir?: string;
 	private hooks?: OperationHooks;
 	private pendingQuestion?: PendingQuestion;
+	private expectedPolicyAck?: string;
+	private policyAcknowledged = false;
+	private preparingTask = false;
 	private checkpoint?: { promise: Promise<SubagentSnapshot>; resolve: (snapshot: SubagentSnapshot) => void };
 	private status: SubagentStatus = "starting";
 	private phase = "launching Pi";
-	private readonly startedAt = Date.now();
+	private startedAt = Date.now();
+	private taskNumber = 1;
+	private taskEndedAt?: number;
+	private currentTask: string;
 	private updatedAt = this.startedAt;
 	private output?: string;
 	private error?: string;
-	private readonly messages: Record<string, any>[] = [];
+	private lastAssistant?: Record<string, any>;
 	private readonly activity: SubagentActivity[] = [];
-	private readonly usage = emptyUsage();
+	private usage = emptyUsage();
+	private readonly totalUsage = emptyUsage();
 	private accountedUsage = emptyUsage();
 
 	constructor(
@@ -236,9 +249,15 @@ class SubagentRun {
 		private readonly parentCwd: string,
 		private readonly invocation: PiInvocation,
 		private readonly routeUi: (run: SubagentRun, request: RpcExtensionUIRequest) => Promise<void>,
+		private readonly onStatusChange: () => void,
 	) {
 		this.id = id;
+		this.currentTask = task.task;
 		this.pushActivity(this.phase);
+	}
+
+	isLive(): boolean {
+		return !TERMINAL_STATUSES.has(this.status);
 	}
 
 	get displayName(): string {
@@ -253,25 +272,28 @@ class SubagentRun {
 		return {
 			id: this.id,
 			agent: this.task.agent,
-			task: this.task.task,
+			task: this.currentTask,
+			taskNumber: this.taskNumber,
 			cwd: this.task.cwd,
 			model: this.task.model,
 			thinkingLevel: this.task.thinkingLevel,
 			status: this.status,
 			phase: this.phase,
 			startedAt: this.startedAt,
+			taskEndedAt: this.taskEndedAt,
 			updatedAt: this.updatedAt,
 			question: this.pendingQuestion?.question,
 			output: this.output,
 			error: this.error,
 			activity: this.activity.map((entry) => ({ ...entry })),
 			usage: structuredClone(this.usage),
+			totalUsage: structuredClone(this.totalUsage),
 		};
 	}
 
 	consumeUsage(): UsageTotals {
-		const delta = usageDifference(this.usage, this.accountedUsage);
-		this.accountedUsage = structuredClone(this.usage);
+		const delta = usageDifference(this.totalUsage, this.accountedUsage);
+		this.accountedUsage = structuredClone(this.totalUsage);
 		return delta;
 	}
 
@@ -279,12 +301,12 @@ class SubagentRun {
 		const checkpoint = this.armCheckpoint();
 		try {
 			await this.preparePrompt();
-			if (this.isCancelled()) {
+			if (this.isStopped()) {
 				await this.cleanupPrompt();
 				return checkpoint;
 			}
 			await verifyCanonicalDirectories([this.parentCwd, this.task.cwd], this.parentCwd);
-			if (this.isCancelled()) {
+			if (this.isStopped()) {
 				await this.cleanupPrompt();
 				return checkpoint;
 			}
@@ -296,12 +318,12 @@ class SubagentRun {
 				(error) => this.handleExit(error),
 			);
 			await this.rpc.start(this.buildArguments());
-			if (this.isCancelled()) {
+			if (this.isStopped()) {
 				await this.rpc.stop();
 				await this.cleanupPrompt();
 				return checkpoint;
 			}
-			this.status = "running";
+			this.setStatus("running");
 			this.setPhase("starting model");
 			this.emitUpdate();
 			await this.rpc.send({ type: "prompt", message: `Task: ${this.task.task}` });
@@ -311,28 +333,81 @@ class SubagentRun {
 		return checkpoint;
 	}
 
-	async reply(answer: string): Promise<SubagentSnapshot> {
+	async continue(task: string, getAutoApproveMode: () => string, hooks: OperationHooks): Promise<SubagentSnapshot> {
+		if (this.status !== "idle" || !this.rpc) {
+			throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}`);
+		}
+		if (!task.trim()) throw new Error("Subagent task must not be blank");
+		this.setStatus("running");
+		this.preparingTask = true;
+		this.hooks = hooks;
+		this.currentTask = task;
+		this.taskNumber++;
+		this.startedAt = Date.now();
+		this.taskEndedAt = undefined;
+		this.output = undefined;
+		this.error = undefined;
+		this.lastAssistant = undefined;
+		this.activity.length = 0;
+		this.usage = emptyUsage();
+		this.setPhase("preparing follow-up task");
+		const checkpoint = this.armCheckpoint();
+		this.emitUpdate();
+		try {
+			await verifyCanonicalDirectories([this.task.cwd], this.parentCwd);
+			if (!this.isRunning()) return checkpoint;
+			const commands = await this.rpc.send({ type: "get_commands" });
+			if (!this.isRunning()) return checkpoint;
+			if (!commands.data?.commands?.some((command: { name: string }) => command.name === SUBAGENT_TASK_COMMAND)) {
+				throw new Error("Subagent task policy command is unavailable");
+			}
+			const autoApproveMode = getAutoApproveMode();
+			this.expectedPolicyAck = taskPolicyAck(this.token, autoApproveMode);
+			this.policyAcknowledged = false;
+			const response = await this.rpc.send({
+				type: "prompt",
+				message: `/${SUBAGENT_TASK_COMMAND} ${this.token} ${autoApproveMode}`,
+			});
+			await this.rpc.flushEvents();
+			if (!this.isRunning()) return checkpoint;
+			this.expectedPolicyAck = undefined;
+			if (response.data?.disposition !== "handled" || !this.policyAcknowledged) {
+				throw new Error("Subagent approval policy update was not acknowledged");
+			}
+			this.setPhase("starting model");
+			this.emitUpdate();
+			this.preparingTask = false;
+			await this.rpc.send({ type: "prompt", message: `Task: ${task}` });
+		} catch (error) {
+			this.fail(error instanceof Error ? error.message : String(error));
+		}
+		return checkpoint;
+	}
+
+	async reply(answer: string, hooks: OperationHooks): Promise<SubagentSnapshot> {
 		if (this.status !== "waiting" || !this.pendingQuestion || !this.rpc) {
 			throw new Error(`Subagent ${this.id} is not waiting for a supervisor reply`);
 		}
+		this.hooks = hooks;
 		const requestId = this.pendingQuestion.requestId;
+		const checkpoint = this.armCheckpoint();
 		try {
 			this.rpc.sendUiResponse({ type: "extension_ui_response", id: requestId, value: answer });
 		} catch (error) {
-			this.hooks = undefined;
-			throw error;
+			this.fail(error instanceof Error ? error.message : String(error));
+			return checkpoint;
 		}
 		this.pendingQuestion = undefined;
-		this.status = "running";
+		this.setStatus("running");
 		this.setPhase("resuming with supervisor answer");
-		const checkpoint = this.armCheckpoint();
 		this.emitUpdate();
 		return checkpoint;
 	}
 
 	async cancel(): Promise<SubagentSnapshot> {
 		if (!TERMINAL_STATUSES.has(this.status)) {
-			this.status = "cancelled";
+			this.taskEndedAt ??= Date.now();
+			this.setStatus("cancelled");
 			this.error = "Cancelled by supervisor";
 			this.setPhase("cancelled");
 			this.pendingQuestion = undefined;
@@ -357,8 +432,18 @@ class SubagentRun {
 		return this.hooks?.ctx;
 	}
 
-	private isCancelled(): boolean {
-		return this.status === "cancelled";
+	private setStatus(status: SubagentStatus): void {
+		if (this.status === status) return;
+		this.status = status;
+		this.onStatusChange();
+	}
+
+	private isRunning(): boolean {
+		return this.status === "running";
+	}
+
+	private isStopped(): boolean {
+		return TERMINAL_STATUSES.has(this.status);
 	}
 
 	private buildArguments(): string[] {
@@ -424,11 +509,24 @@ class SubagentRun {
 	}
 
 	private async handleEvent(event: Record<string, any>): Promise<void> {
+		if (TERMINAL_STATUSES.has(this.status)) return;
+		if (this.status === "idle" || this.preparingTask) {
+			const dialog = event.type === "extension_ui_request" && isDialogRequest(event as RpcExtensionUIRequest);
+			if (dialog || ["agent_start", "agent_settled", "turn_start", "message_start", "message_end", "tool_execution_start"].includes(event.type)) {
+				this.fail("Unexpected subagent activity outside an assigned task");
+				return;
+			}
+			if (this.status === "idle") return;
+		}
 		if (event.type === "extension_ui_request") {
 			const request = event as RpcExtensionUIRequest;
+			if (request.method === "notify" && this.expectedPolicyAck && request.message === this.expectedPolicyAck) {
+				this.policyAcknowledged = true;
+				return;
+			}
 			if (request.method === "editor" && isQuestionTitle(request.title, this.token)) {
 				this.pendingQuestion = { requestId: request.id, question: parseQuestion(request.prefill) };
-				this.status = "waiting";
+				this.setStatus("waiting");
 				this.setPhase("waiting for supervisor");
 				this.emitUpdate();
 				this.settleCheckpoint();
@@ -477,11 +575,12 @@ class SubagentRun {
 			}
 			case "message_end":
 				if (event.message) {
-					this.messages.push(event.message);
 					if (event.message.role === "assistant" || event.message.role === "toolResult") {
 						addUsage(this.usage, event.message.usage);
+						addUsage(this.totalUsage, event.message.usage);
 					}
 					if (event.message.role === "assistant") {
+						this.lastAssistant = event.message;
 						const text = assistantText(event.message);
 						if (text) this.output = text;
 					}
@@ -503,18 +602,26 @@ class SubagentRun {
 			case "agent_end":
 				this.setPhase("finalizing");
 				break;
+			case "compaction_start":
+				this.setPhase("compacting context");
+				break;
+			case "compaction_end":
+				addUsage(this.usage, event.result?.usage);
+				addUsage(this.totalUsage, event.result?.usage);
+				this.setPhase("finishing compaction");
+				break;
 			case "extension_error":
 				this.pushActivity(`extension error: ${String(event.error ?? "unknown")}`);
 				break;
 			case "agent_settled": {
-				const lastAssistant = [...this.messages].reverse().find((message) => message.role === "assistant");
+				const lastAssistant = this.lastAssistant;
 				if (lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted") {
 					this.fail(lastAssistant.errorMessage || `Subagent stopped: ${lastAssistant.stopReason}`);
 				} else {
-					this.status = "completed";
-					this.setPhase("completed");
+					this.setStatus("idle");
+					this.setPhase("task complete; idle");
+					this.taskEndedAt = this.updatedAt;
 					this.settleCheckpoint();
-					void this.rpc?.stop().finally(() => this.cleanupPrompt());
 				}
 				return;
 			}
@@ -526,12 +633,13 @@ class SubagentRun {
 
 	private handleExit(error: Error | undefined): void {
 		if (TERMINAL_STATUSES.has(this.status)) return;
-		this.fail(error?.message ?? "Subagent process exited before completing");
+		this.fail(error?.message ?? "Subagent process exited unexpectedly");
 	}
 
 	private fail(message: string): void {
 		if (TERMINAL_STATUSES.has(this.status)) return;
-		this.status = "failed";
+		this.taskEndedAt ??= Date.now();
+		this.setStatus("failed");
 		this.error = message;
 		this.setPhase("failed");
 		this.pushActivity(message);
@@ -543,18 +651,22 @@ class SubagentRun {
 
 export interface SubagentManagerOptions {
 	invocation?: PiInvocation;
+	onLiveCountChange?: (count: number) => void;
 	onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
 }
 
 export class SubagentManager {
 	private readonly runs = new Map<string, SubagentRun>();
 	private readonly invocation: PiInvocation;
+	private readonly onLiveCountChange?: (count: number) => void;
+	private lastLiveCount = 0;
 	private readonly onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
 	private readonly shutdownController = new AbortController();
 	private dialogQueue = Promise.resolve();
 
 	constructor(options: SubagentManagerOptions = {}) {
 		this.invocation = options.invocation ?? resolvePiInvocation();
+		this.onLiveCountChange = options.onLiveCountChange;
 		this.onAutoApproveStat = options.onAutoApproveStat;
 	}
 
@@ -578,12 +690,15 @@ export class SubagentManager {
 		await this.approveDifferentWorkingDirectories(canonicalTasks, canonicalParentCwd, ctx, startSignal);
 		this.ensureCanStart(startSignal);
 		const runs = canonicalTasks.map((task) => {
-			const run = new SubagentRun(this.createRunId(), task, canonicalParentCwd, this.invocation, (current, request) =>
-				this.enqueueUserUi(current, request),
+			const run = new SubagentRun(
+				this.createRunId(), task, canonicalParentCwd, this.invocation,
+				(current, request) => this.enqueueUserUi(current, request),
+				() => this.publishLiveCount(),
 			);
 			this.runs.set(run.id, run);
 			return run;
 		});
+		this.publishLiveCount();
 		const update = () => onUpdate?.(runs.map((run) => run.snapshot()));
 		for (const run of runs) run.setHooks({ ctx, onUpdate: update });
 		update();
@@ -608,15 +723,51 @@ export class SubagentManager {
 		signal?: AbortSignal,
 	): Promise<SubagentSnapshot> {
 		const run = this.requireRun(id);
+		if (run.snapshot().status !== "waiting") throw new Error(`Subagent ${id} is not waiting for a supervisor reply`);
 		if (signal?.aborted) return run.cancel();
-		run.setHooks({ ctx, onUpdate: () => onUpdate?.([run.snapshot()]) });
 		const abort = () => void run.cancel();
 		signal?.addEventListener("abort", abort, { once: true });
 		try {
-			return await run.reply(answer);
+			return await run.reply(answer, { ctx, onUpdate: () => onUpdate?.([run.snapshot()]) });
 		} finally {
 			signal?.removeEventListener("abort", abort);
 		}
+	}
+
+	async continue(
+		id: string,
+		task: string,
+		getAutoApproveMode: () => string,
+		ctx: ExtensionContext,
+		onUpdate?: (snapshots: SubagentSnapshot[]) => void,
+		signal?: AbortSignal,
+	): Promise<SubagentSnapshot> {
+		const run = this.requireRun(id);
+		this.ensureCanStart(this.shutdownController.signal);
+		const status = run.snapshot().status;
+		if (status !== "idle") throw new Error(`Subagent ${id} cannot accept a task while ${status}`);
+		if (!task.trim()) throw new Error("Subagent task must not be blank");
+		if (signal?.aborted) return run.cancel();
+		const abort = () => void run.cancel();
+		signal?.addEventListener("abort", abort, { once: true });
+		try {
+			return await run.continue(task, getAutoApproveMode, { ctx, onUpdate: () => onUpdate?.([run.snapshot()]) });
+		} finally {
+			signal?.removeEventListener("abort", abort);
+		}
+	}
+
+	liveCount(): number {
+		let count = 0;
+		for (const run of this.runs.values()) if (run.isLive()) count++;
+		return count;
+	}
+
+	private publishLiveCount(): void {
+		const count = this.liveCount();
+		if (count === this.lastLiveCount) return;
+		this.lastLiveCount = count;
+		this.onLiveCountChange?.(count);
 	}
 
 	status(id?: string): SubagentSnapshot[] {
@@ -684,7 +835,7 @@ export class SubagentManager {
 		const confirmed = await this.enqueueDialog(
 			() => ctx.ui.confirm(
 				"Subagent working directory approval required",
-				`Allow ${differentCwdTasks.length === 1 ? "this subagent" : "these subagents"} to use a working directory different from the parent?\n\nParent working directory:\n${JSON.stringify(parentCwd)}\n\nRequested runs:\n${requestedRuns}`,
+				`Allow ${differentCwdTasks.length === 1 ? "this subagent" : "these subagents"} to use a working directory different from the parent for this parent session, including follow-up tasks?\n\nParent working directory:\n${JSON.stringify(parentCwd)}\n\nRequested runs:\n${requestedRuns}`,
 				{ signal },
 			),
 			signal,

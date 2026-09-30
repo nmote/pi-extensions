@@ -150,6 +150,10 @@ export class RpcProcess {
 		});
 	}
 
+	async flushEvents(): Promise<void> {
+		await this.eventQueue;
+	}
+
 	sendUiResponse(response: Record<string, unknown>): void {
 		const child = this.process;
 		if (!child || child.exitCode !== null || child.signalCode !== null || !child.stdin.writable) {

@@ -52,6 +52,8 @@ import { realPathOf } from "./realpath.ts";
 import {
 	AUTO_APPROVE_STATE_CHANNEL,
 	AUTO_APPROVE_STAT_CHANNEL,
+	AUTO_APPROVE_TASK_CHANNEL,
+	SUBAGENT_TOKEN_ENV,
 	type AutoApproveStat,
 	isAutoApproveStat,
 	tagApprovalTitle,
@@ -124,6 +126,16 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		request?.respond?.({ mode });
 	});
 
+	pi.events.on(AUTO_APPROVE_TASK_CHANNEL, (data) => {
+		const request = data as { token?: string; mode?: unknown; ctx: ExtensionContext; respond: () => void };
+		const token = process.env[SUBAGENT_TOKEN_ENV];
+		if (!token || request?.token !== token || !isMode(request.mode)) return;
+		oneShotAllow.clear();
+		pendingApprovals.clear();
+		setMode(request.mode, request.ctx, false);
+		request.respond();
+	});
+
 	pi.events.on(AUTO_APPROVE_STAT_CHANNEL, (data) => {
 		const stat = (data as { stat?: unknown } | undefined)?.stat;
 		if (isAutoApproveStat(stat)) record(stat);
@@ -146,11 +158,11 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		}
 	}
 
-	function setMode(next: Mode, ctx: ExtensionContext): void {
+	function setMode(next: Mode, ctx: ExtensionContext, announce = true): void {
 		mode = next;
 		pi.appendEntry(MODE_ENTRY, { mode });
 		updateStatus(ctx);
-		ctx.ui.notify(`Auto-approve mode: ${modeLabel(mode)}`, mode === "yolo" ? "warning" : "info");
+		if (announce) ctx.ui.notify(`Auto-approve mode: ${modeLabel(mode)}`, mode === "yolo" ? "warning" : "info");
 	}
 
 	function setEffort(effort: AutoApproveConfig["evaluator"]["reasoningEffort"], ctx: ExtensionContext): void {

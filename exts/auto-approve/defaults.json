@@ -9,6 +9,7 @@
     { "tool": "session_notes", "description": "Transient session notes" },
     { "tool": "session_todos", "description": "Transient session todos" },
     { "tool": "subagent", "description": "Delegate to isolated, supervised agents" },
+    { "tool": "subagent_continue", "description": "Assign related work to an idle subagent" },
     { "tool": "subagent_reply", "description": "Answer a waiting subagent" },
     { "tool": "subagent_status", "description": "Inspect subagent runs" },
     { "tool": "subagent_cancel", "description": "Cancel subagent runs" },

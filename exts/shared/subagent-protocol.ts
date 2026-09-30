@@ -1,5 +1,7 @@
 export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_TOKEN_ENV = "PI_SUBAGENT_TOKEN";
+export const SUBAGENT_TASK_COMMAND = "_subagent-task";
+export const AUTO_APPROVE_TASK_CHANNEL = "auto-approve:subagent-task";
 export const AUTO_APPROVE_STATE_CHANNEL = "auto-approve:get-state";
 export const AUTO_APPROVE_STAT_CHANNEL = "auto-approve:record-stat";
 export const AUTO_APPROVE_STAT_NAMES = [
@@ -44,6 +46,10 @@ export function parseAutoApproveStat(message: string, token: string): AutoApprov
 	if (!message.startsWith(prefix)) return undefined;
 	const stat = message.slice(prefix.length);
 	return isAutoApproveStat(stat) ? stat : undefined;
+}
+
+export function taskPolicyAck(token: string, mode: string): string {
+	return `${marker("pi-subagent-task-policy", token)}${mode}`;
 }
 
 export function questionTitle(token: string): string {

@@ -4,6 +4,7 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	type ExtensionAPI,
+	type ExtensionContext,
 	getMarkdownTheme,
 	type Theme,
 	type ToolRenderResultOptions,
@@ -14,6 +15,9 @@ import { Type } from "typebox";
 import {
 	AUTO_APPROVE_STATE_CHANNEL,
 	AUTO_APPROVE_STAT_CHANNEL,
+	AUTO_APPROVE_TASK_CHANNEL,
+	SUBAGENT_TASK_COMMAND,
+	taskPolicyAck,
 	questionTitle,
 	SUBAGENT_RUN_ID_ENV,
 	SUBAGENT_TOKEN_ENV,
@@ -44,6 +48,8 @@ import {
 	progressText,
 } from "./status.ts";
 
+// Footer keys sort alphabetically; keep this after backlog.
+const STATUS_KEY = "backlog-subagents";
 const MAX_PARALLEL_TASKS = 8;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -96,10 +102,13 @@ function questionText(result: SubagentSnapshot): string {
 }
 
 function formatResult(result: SubagentSnapshot): string {
-	const heading = formatResultHeading(result);
+	const total = result.totalUsage ?? result.usage;
+	const heading = `${formatResultHeading(result)}\n\nUsage: ${result.usage.totalTokens} tokens this task; ${total.totalTokens} tokens / $${total.cost.total.toFixed(3)} lifetime.`;
 	switch (result.status) {
 		case "waiting":
 			return `${heading}\n\n${questionText(result)}\n\nUse subagent_reply with id ${result.id} after deciding the answer.`;
+		case "idle":
+			return `${heading}\n\n${truncateOutput(result.output || "(no output)")}\n\nUse subagent_continue with id ${result.id} for related work, or subagent_cancel to end it.`;
 		case "completed":
 			return `${heading}\n\n${truncateOutput(result.output || "(no output)")}`;
 		case "failed":
@@ -121,7 +130,7 @@ function formatExpandedResult(result: SubagentSnapshot): string {
 	const activity = formatActivity(result) || "(no activity yet)";
 	let outcome = "";
 	if (result.status === "waiting") outcome = `${questionText(result)}\n\nUse subagent_reply with id ${result.id} after deciding the answer.`;
-	else if (result.status === "completed") outcome = `#### Output\n\n${truncateOutput(result.output || "(no output)")}`;
+	else if (result.status === "idle" || result.status === "completed") outcome = `#### Output\n\n${truncateOutput(result.output || "(no output)")}`;
 	else if (result.error) outcome = `#### Error\n\n${result.error}`;
 	return `### ${result.agent} (${result.id}) — ${result.status}\n\n${metadata}\n\n#### Recent activity\n\n\`\`\`text\n${activity}\n\`\`\`${outcome ? `\n\n${outcome}` : ""}`;
 }
@@ -187,6 +196,20 @@ function getAutoApproveMode(pi: ExtensionAPI): string {
 }
 
 function registerChildTool(pi: ExtensionAPI, token: string): void {
+	pi.on("cache_warming_decision", () => ({ action: "stop" }));
+	pi.registerCommand(SUBAGENT_TASK_COMMAND, {
+		description: "Internal managed-subagent task policy update",
+		handler: async (args, ctx) => {
+			const [providedToken, mode, extra] = args.trim().split(/\s+/);
+			if (ctx.mode !== "rpc" || providedToken !== token || extra || !["manual", "auto", "yolo"].includes(mode)) {
+				throw new Error("Invalid subagent policy update");
+			}
+			let applied = false;
+			pi.events.emit(AUTO_APPROVE_TASK_CHANNEL, { token, mode, ctx, respond: () => { applied = true; } });
+			if (!applied) throw new Error("Subagent approval policy is unavailable");
+			ctx.ui.notify(taskPolicyAck(token, mode), "info");
+		},
+	});
 	pi.registerTool({
 		name: "ask_supervisor",
 		label: "Ask Supervisor",
@@ -221,8 +244,19 @@ export default function subagents(pi: ExtensionAPI): void {
 	let catalogAvailable = false;
 	// Tool calls in one turn can run concurrently; the parent must see the catalog result first.
 	pi.on("turn_start", () => { catalogAvailable = catalogListed; });
+	let statusContext: ExtensionContext | undefined;
+	function refreshStatus(count: number): void {
+		if (!statusContext?.hasUI) return;
+		statusContext.ui.setStatus(STATUS_KEY, count ? statusContext.ui.theme.fg("dim", `subagents: ${count} live`) : undefined);
+	}
 	const manager = new SubagentManager({
+		onLiveCountChange: refreshStatus,
 		onAutoApproveStat: (stat) => pi.events.emit(AUTO_APPROVE_STAT_CHANNEL, { stat }),
+	});
+
+	pi.on("session_start", (_event, ctx) => {
+		statusContext = ctx;
+		refreshStatus(manager.liveCount());
 	});
 
 	pi.registerTool({
@@ -242,13 +276,14 @@ export default function subagents(pi: ExtensionAPI): void {
 		pi.registerTool({
 			name: "subagent",
 			label: "Subagent",
-			description: `Delegate one task or a concurrent batch to isolated, supervised Pi agents. Call list_subagents before selecting a named agent; general delegation needs no lookup. Each task may select its own cwd, model, and thinking level. The tool returns when each child completes or asks its supervisor a question. ${policy.text}`,
+			description: `Delegate one task or a concurrent batch to isolated, supervised Pi agents. Call list_subagents before selecting a named agent; general delegation needs no lookup. Each task may select its own cwd, model, and thinking level. The tool returns when each child finishes its task (remaining idle with its context) or asks its supervisor a question. Use subagent_continue for related follow-up tasks and subagent_cancel to end a child. ${policy.text}`,
 			promptSnippet: "Delegate substantial, focused work to isolated supervised agents",
 			promptGuidelines: [
 				"Use subagent only when independent investigation has clear value over startup and context-transfer cost. Work directly on trivial, mechanical, narrowly scoped, or directly verifiable tasks.",
 				"Before using subagent for review, inspect the change, identify a concrete risk, and select only specialties that match it. Treat delegation as one checkpoint per logical change.",
 				"Call list_subagents before setting subagent.agent or any subagent.tasks[].agent; use the returned descriptions to choose a named agent. General subagents do not need this lookup.",
 				"Do not use subagent to repeat a review unless later work materially changes the behavior or risk reviewed. Scope each task to the concrete question and relevant files or functions.",
+				"Reuse an idle subagent with subagent_continue for related work so it retains context; use subagent_cancel to end it when finished.",
 				"When subagent reports a supervisor question, answer it yourself when existing context is sufficient; otherwise ask the user, then call subagent_reply with their answer.",
 				"Subagent runs with a different working directory require direct user approval.",
 				"Do not run parallel write-capable subagent tasks in the same worktree unless their changes are explicitly partitioned.",
@@ -309,6 +344,27 @@ export default function subagents(pi: ExtensionAPI): void {
 	registerSubagentTool(loadSubagentModels());
 
 	pi.registerTool({
+		name: "subagent_continue",
+		label: "Continue Subagent",
+		description: "Assign a related task to an idle subagent, retaining its process and conversation context. Reuses its agent, model, thinking level, cwd, and tools; inherits the parent's current approval mode. Returns at task completion or a supervisor question. Use subagent_reply for waiting questions; ended agents cannot be reused.",
+		parameters: Type.Object({
+			id: Type.String({ minLength: 1, description: "Idle subagent ID" }),
+			task: TaskFields.task,
+		}),
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const reporter = createProgressReporter(ctx.mode === "tui", "continue", onUpdate);
+			let result: SubagentSnapshot;
+			try {
+				result = await manager.continue(params.id, params.task, () => getAutoApproveMode(pi), ctx, reporter.publish, signal);
+			} finally {
+				reporter.stop();
+			}
+			return resultWithUsage("continue", [result], manager.consumeUsage([result.id]));
+		},
+		renderResult: renderSubagentResult,
+	});
+
+	pi.registerTool({
 		name: "subagent_reply",
 		label: "Reply to Subagent",
 		description: "Answer a waiting subagent question and run it until completion or its next supervisor question.",
@@ -333,7 +389,7 @@ export default function subagents(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_status",
 		label: "Subagent Status",
-		description: "Inspect one subagent run or all runs in the current parent session.",
+		description: "Inspect one subagent or all agents in the current parent session, including latest-task output, task usage, and lifetime usage totals.",
 		parameters: Type.Object({ id: Type.Optional(Type.String({ description: "Run ID; omit to list all" })) }),
 		async execute(_toolCallId, params) {
 			return resultWithUsage("status", manager.status(params.id));
@@ -343,8 +399,8 @@ export default function subagents(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_cancel",
 		label: "Cancel Subagent",
-		description: "Cancel one subagent run, or all active runs when id is omitted.",
-		parameters: Type.Object({ id: Type.Optional(Type.String({ description: "Run ID; omit to cancel all active runs" })) }),
+		description: "End one subagent, including an idle one, releasing its process and context. Omit id to end all live subagents. Ended agents cannot be reused.",
+		parameters: Type.Object({ id: Type.Optional(Type.String({ description: "Subagent ID; omit to end all live subagents" })) }),
 		async execute(_toolCallId, params) {
 			return resultWithUsage("cancel", await manager.cancel(params.id));
 		},
@@ -407,6 +463,8 @@ export default function subagents(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		refreshStatus(0);
+		statusContext = undefined;
 		await manager.shutdown();
 	});
 }

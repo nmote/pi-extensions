@@ -22,7 +22,7 @@ both session-topic and auto-approve, etc.
 | session-memory | `session_notes`, `session_todos`, `/notes`, `/todos`; branch-aware session state |
 | session-topic | `/topic`; optional authenticated small model for titles/summaries |
 | small-model | `/small-model`; shared background-model selection |
-| subagents | `list_subagents`, `subagent`, reply/status/cancel tools, `/subagents`, `/subagent-models`; isolated Pi child processes |
+| subagents | `list_subagents`, `subagent`, continue/reply/status/cancel tools, `/subagents`, `/subagent-models`; isolated Pi child processes |
 | web | `web_fetch`; anonymous GET only, guarded addresses/redirects and bounded text output |
 
 ## Install
@@ -73,6 +73,22 @@ Configuration and state are independent of the package checkout.
   show the effective directory and errors. Reload after editing definitions.
 - [examples/](examples/) contains optional neutral configuration and a named
   agent. Nothing there is installed automatically.
+
+### Reusable subagents
+
+Successful subagents remain idle within the parent session. Use
+`subagent_continue` with their ID and a related task to retain the same process
+and conversation context (subject to normal Pi compaction). Agent instructions,
+model, thinking level, cwd, and tools stay fixed. Each follow-up inherits the
+parent's current approval mode; remembered exact-call approvals persist, but
+one-shot approvals expire between tasks. Cwd approval covers the child's lifetime.
+
+`subagent_reply` answers waiting questions. `subagent_cancel` ends a child,
+including an idle one; omit its ID to end all live children. Ended or failed
+children cannot be reused. Parent shutdown releases all children. Status shows
+the latest task, its usage, and lifetime usage totals; no cross-session reuse.
+The footer shows `subagents: N live`, including idle and active children, and
+omits the item when none remain.
 
 ### Approval policy
 

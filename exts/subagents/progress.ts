@@ -4,7 +4,7 @@ import { progressText } from "./status.ts";
 
 const DEFAULT_HEARTBEAT_MS = 1_000;
 
-export type SubagentOperation = "spawn" | "reply" | "status" | "cancel";
+export type SubagentOperation = "spawn" | "continue" | "reply" | "status" | "cancel";
 
 export interface SubagentDetails {
 	operation: SubagentOperation;
