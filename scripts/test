@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Runs Pi extension smoke tests.
+
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+
+if [ "$#" -gt 1 ]; then
+    echo "usage: $0 [subdirectory]" >&2
+    exit 2
+fi
+
+scope=${1:-.}
+if [ ! -d "$ROOT/$scope" ]; then
+    echo "unknown extension subdirectory: $scope" >&2
+    exit 2
+fi
+target=$(cd "$ROOT/$scope" && pwd -P)
+if [[ "$target" != "$ROOT" && "$target" != "$ROOT/"* ]]; then
+    echo "scope must be within $ROOT" >&2
+    exit 2
+fi
+
+tsx="$ROOT/node_modules/.bin/tsx"
+if [ ! -x "$tsx" ]; then
+    echo "missing dev dependencies; run 'npm ci' in $ROOT first" >&2
+    exit 1
+fi
+
+test_files=$(find "$target" -type f -name '*.test.ts' -not -path '*/node_modules/*' | LC_ALL=C sort)
+if [ -z "$test_files" ]; then
+    echo "no tests found under $scope" >&2
+    exit 1
+fi
+
+while IFS= read -r test_file; do
+    echo "==> ${test_file#"$ROOT/"}"
+    "$tsx" "$test_file"
+done <<< "$test_files"

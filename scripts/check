@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Type-checks Pi extensions against their pinned dev dependencies and rejects
+# imports that Pi cannot supply at runtime.
+
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+
+if [ "$#" -gt 1 ]; then
+    echo "usage: $0 [subdirectory]" >&2
+    exit 2
+fi
+
+scope=${1:-.}
+if [ ! -d "$ROOT/$scope" ]; then
+    echo "unknown extension subdirectory: $scope" >&2
+    exit 2
+fi
+target=$(cd "$ROOT/$scope" && pwd -P)
+if [[ "$target" != "$ROOT" && "$target" != "$ROOT/"* ]]; then
+    echo "scope must be within $ROOT" >&2
+    exit 2
+fi
+
+tsc="$ROOT/node_modules/.bin/tsc"
+tsx="$ROOT/node_modules/.bin/tsx"
+if [ ! -x "$tsc" ] || [ ! -x "$tsx" ]; then
+    echo "missing dev dependencies; run 'npm ci' in $ROOT first" >&2
+    exit 1
+fi
+
+if [[ "$scope" == "." ]]; then
+    "$tsc" --project "$ROOT/tsconfig.json"
+else
+    temp=$(mktemp -d "${TMPDIR:-/tmp}/pi-extensions-check.XXXXXX")
+    trap 'rm -rf "$temp"' EXIT
+    printf '{\n  "extends": "%s",\n  "include": ["%s/**/*.ts"]\n}\n' \
+        "$ROOT/tsconfig.json" "$target" > "$temp/tsconfig.json"
+    "$tsc" --project "$temp/tsconfig.json"
+fi
+
+"$tsx" "$ROOT/scripts/check-imports.ts" "$ROOT" "$target"

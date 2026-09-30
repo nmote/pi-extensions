@@ -1,0 +1,35 @@
+{
+  "defaultMode": "auto",
+  "allow": [
+    { "tool": "backlog", "description": "Persistent backlog; writes only its own store" },
+    { "tool": "cloud_agent_status", "description": "Read-only: cloud agent status" },
+    { "tool": "cloud_agent_apply", "description": "Apply a Codex diff only to a clean Git worktree; no commit, push, or PR" },
+    { "tool": "list_models", "description": "Read-only: enumerate available models" },
+    { "tool": "request_tool_approval", "description": "Escalate a rejected tool call for human approval" },
+    { "tool": "session_notes", "description": "Transient session notes" },
+    { "tool": "session_todos", "description": "Transient session todos" },
+    { "tool": "subagent", "description": "Delegate to isolated, supervised agents" },
+    { "tool": "subagent_reply", "description": "Answer a waiting subagent" },
+    { "tool": "subagent_status", "description": "Inspect subagent runs" },
+    { "tool": "subagent_cancel", "description": "Cancel subagent runs" },
+    { "tool": "ask_supervisor", "description": "Child subagent asks the parent for guidance" }
+  ],
+  "deny": [],
+  "context": [
+    {
+      "tool": "web_fetch",
+      "instructions": "web_fetch sends one anonymous HTTP GET with no cookies, credentials, custom headers, or body. The tool itself refuses private-network addresses and returns cross-origin redirects for a separate call, so judge only this URL. Approve fetches of public reference material such as documentation, source code hosts, package registries, issue trackers, standards, and articles, including ordinary search, filter, and pagination parameters. Commit SHAs, issue numbers, versions, and page slugs are ordinary identifiers. Request human review when any part of the URL could carry data out of the workspace: values resembling secrets, tokens, API keys, credentials, environment variables, internal hostnames, personal data, file or repository contents, or long encoded or opaque strings that are not ordinary identifiers. Request human review for request-capture, paste, webhook, tunneling, and URL-shortener services, bare IP addresses, and unusual ports. Request human review when a GET likely triggers an action: signed or one-time links; confirm, unsubscribe, approve, delete, trigger, or similar endpoints; or API endpoints that are not plainly read-only."
+    },
+    {
+      "tool": "bash",
+      "pattern": "\\b(curl|wget)\\b",
+      "instructions": "Judge every curl or wget URL as web_fetch URLs are judged: approve anonymous GETs of public reference material, and request human review for URLs that could carry workspace data out, for capture, paste, webhook, tunneling, or URL-shortener services, and for GETs that likely trigger actions. Approve read-only GETs to loopback development servers, but request human review for other private-network addresses, including cloud metadata endpoints. Also request human review for non-GET methods; request bodies or uploads (such as -d, --data, -F, --form, -T, --upload-file, --post-data, --post-file, or @file arguments); authorization headers, cookies, or credentials (such as -H Authorization, -b, -u, or --netrc); disabled certificate checks (-k, --insecure, --no-check-certificate); and output piped into a shell or interpreter. Saving a response within the working directory or /tmp is fine."
+    }
+  ],
+  "writeRoots": ["/tmp"],
+  "evaluator": {
+    "reasoningEffort": "low",
+    "timeoutMs": 20000,
+    "memoize": true
+  }
+}
