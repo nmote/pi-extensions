@@ -101,9 +101,9 @@ export default function backlog(pi: ExtensionAPI): void {
 		if (!ctx.hasUI) return;
 		try {
 			const summary = statusSummary(await store.load(), currentRepo(operationContext(ctx)));
-			ctx.ui.setStatus(STATUS_KEY, summary ? ctx.ui.theme.fg("dim", `backlog: ${summary}`) : undefined);
+			ctx.ui.setStatus(STATUS_KEY, summary ? ctx.ui.theme.fg("dim", `[backlog: ${summary}]`) : undefined);
 		} catch {
-			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", "backlog: unreadable"));
+			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", "[backlog: unreadable]"));
 		}
 	}
 

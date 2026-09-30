@@ -247,7 +247,7 @@ export default function subagents(pi: ExtensionAPI): void {
 	let statusContext: ExtensionContext | undefined;
 	function refreshStatus(count: number): void {
 		if (!statusContext?.hasUI) return;
-		statusContext.ui.setStatus(STATUS_KEY, count ? statusContext.ui.theme.fg("dim", `subagents: ${count} live`) : undefined);
+		statusContext.ui.setStatus(STATUS_KEY, count ? statusContext.ui.theme.fg("dim", `[subagents: ${count} live]`) : undefined);
 	}
 	const manager = new SubagentManager({
 		onLiveCountChange: refreshStatus,

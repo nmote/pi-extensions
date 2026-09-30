@@ -1292,7 +1292,7 @@ async function main(): Promise<void> {
 		"completed-work generation does not delay turn finalization",
 		recomputedRollup.generationCalls === 1 &&
 			canceledRollupSignal?.aborted === false &&
-			recomputedRollup.statuses.at(-1) === "summarizing…",
+			recomputedRollup.statuses.at(-1) === "[summarizing…]",
 	);
 	await recomputedRollup.submitUser("Complete a newer task before the rollup finishes");
 	await recomputedRollup.emit("agent_start", { type: "agent_start" });

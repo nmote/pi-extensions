@@ -167,12 +167,12 @@ try {
 		check("spawn prompt omits named agent names", !spawn.description.includes("correctness-reviewer"));
 		const general = await spawn.execute("general", { task: "done general" }, undefined, undefined, ctx);
 		check("general delegation works before catalog lookup", general.details.results[0]?.agent === "general" && general.details.results[0]?.output === "done");
-		check("idle child remains in the persistent footer", footer.at(-1)?.value === "subagents: 1 live");
+		check("idle child remains in the persistent footer", footer.at(-1)?.value === "[subagents: 1 live]");
 		const footerUpdatesBeforeContinuation = footer.length;
 		setMode("manual");
 		const continued = await tools.get("subagent_continue").execute("continue", { id: general.details.results[0].id, task: "recall" }, undefined, undefined, ctx);
 		const recalled = JSON.parse(continued.details.results[0].output);
-		check("continuation does not duplicate the live count", footer.length === footerUpdatesBeforeContinuation && footer.at(-1)?.value === "subagents: 1 live");
+		check("continuation does not duplicate the live count", footer.length === footerUpdatesBeforeContinuation && footer.at(-1)?.value === "[subagents: 1 live]");
 		check("follow-up tool inherits current mode and reports only new usage", recalled.mode === "manual" && continued.usage.totalTokens === 18 && continued.details.results[0].totalUsage.totalTokens === 36);
 		check("idle result explains reuse and ending", continued.content[0].text.includes("subagent_continue") && continued.content[0].text.includes("subagent_cancel") && continued.content[0].text.includes("36 tokens / $0.066 lifetime"));
 		const namedError = await errorMessage(spawn.execute("named", { task: "done named", agent: "correctness-reviewer" }, undefined, undefined, ctx));
@@ -193,9 +193,9 @@ try {
 			{ task: "done plain" }, { task: "done named", agent: "correctness-reviewer" },
 		] }, undefined, undefined, ctx);
 		check("mixed batches succeed after catalog lookup", mixed.details.results.map((result: { agent: string; output?: string }) => `${result.agent}:${result.output}`).join(",") === "general:done,correctness-reviewer:done");
-		check("parallel children are counted in the footer", footer.at(-1)?.value === "subagents: 4 live");
+		check("parallel children are counted in the footer", footer.at(-1)?.value === "[subagents: 4 live]");
 		await tools.get("subagent_cancel").execute("end-one", { id: general.details.results[0].id });
-		check("ending a child decrements the footer", footer.at(-1)?.value === "subagents: 3 live");
+		check("ending a child decrements the footer", footer.at(-1)?.value === "[subagents: 3 live]");
 		await tools.get("subagent_cancel").execute("end-all", {});
 		check("ending all children omits the footer", footer.at(-1)?.value === undefined);
 		const { tools: anotherRuntime, beginTurn: beginNewTurn } = register();

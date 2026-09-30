@@ -57,6 +57,7 @@ async function main(): Promise<void> {
 		const commands = new Map<string, any>();
 		const entries: Array<{ customType: string; data: unknown }> = [];
 		const notices: string[] = [];
+		const statuses: Array<{ key: string; value: string | undefined }> = [];
 		let selection: string | undefined = "Approve once";
 		const pi = {
 			events: {
@@ -132,13 +133,14 @@ async function main(): Promise<void> {
 			sessionManager: { getEntries: () => resumedEntries ?? [cachedReview, cachedMetadataReview] },
 			ui: {
 				theme: { fg: (_color: string, text: string) => text },
-				setStatus() {},
+				setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); },
 				setWidget() {},
 				notify(message: string) { notices.push(message); },
 				select: async () => selection,
 			},
 		};
 		await handlers.get("session_start")?.[0]?.({}, ctx);
+		check("mode footer is bracketed", statuses.at(-1)?.value === "[🤖 auto]");
 		const gate = handlers.get("tool_call")?.[0];
 		if (!gate) throw new Error("tool_call handler was not registered");
 
@@ -153,6 +155,7 @@ async function main(): Promise<void> {
 		);
 		await gate({ toolName: "read", input: { path: "/shared/x/.git/config" } }, ctx);
 		check("read of .git within readRoots is evaluated", evaluatorRequests.length === 1);
+		check("gate brackets and clears evaluation status", statuses.at(-2)?.value === "[evaluating…]" && statuses.at(-1)?.value === undefined);
 		await gate({ toolName: "write", input: { path: "/shared/file.ts", content: "" } }, ctx);
 		check(
 			"write within readRoots is evaluated with the path scope",
@@ -237,6 +240,7 @@ async function main(): Promise<void> {
 		check("stats snapshots are persisted", entries.some((entry) => entry.customType === "auto-approve-stats"));
 
 		await commands.get("auto").handler('test web_fetch {"url":"https://example.com/"}', ctx);
+		check("test command brackets and clears evaluation status", statuses.at(-2)?.value === "[evaluating…]" && statuses.at(-1)?.value === undefined);
 		const toolTest = evaluatorRequests.at(-1);
 		const toolTestData = toolTest?.messages[0]?.content[0]?.text ?? "";
 		check(

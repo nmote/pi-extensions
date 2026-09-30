@@ -148,7 +148,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 
 	function updateStatus(ctx: ExtensionContext): void {
 		const color = mode === "yolo" ? "error" : mode === "auto" ? "accent" : "warning";
-		ctx.ui.setStatus("auto-approve", ctx.ui.theme.fg(color, modeLabel(mode)));
+		ctx.ui.setStatus("auto-approve", ctx.ui.theme.fg(color, `[${modeLabel(mode)}]`));
 		if (mode === "yolo") {
 			ctx.ui.setWidget("auto-approve", [
 				ctx.ui.theme.fg("error", "☠️  YOLO MODE — tool calls auto-approved (deny list still blocks)"),
@@ -484,7 +484,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			}
 
 			const effort = config.evaluator.reasoningEffort;
-			ctx.ui.setStatus("auto-approve-eval", ctx.ui.theme.fg("muted", "evaluating…"));
+			ctx.ui.setStatus("auto-approve-eval", ctx.ui.theme.fg("muted", "[evaluating…]"));
 			try {
 				result = await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, instructions);
 			} finally {
@@ -594,7 +594,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					return;
 				}
 				const instructions = evaluatorInstructions(buildMatchInput(call.toolName, call.input), ctx.cwd);
-				ctx.ui.setStatus("auto-approve-eval", ctx.ui.theme.fg("muted", "evaluating…"));
+				ctx.ui.setStatus("auto-approve-eval", ctx.ui.theme.fg("muted", "[evaluating…]"));
 				let result: Awaited<ReturnType<typeof evaluateSafety>>;
 				try {
 					result = await evaluateSafety(model, ctx, call.toolName, call.input, config.evaluator, instructions);

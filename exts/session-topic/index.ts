@@ -436,7 +436,7 @@ export function registerSessionTopic(
 		const statusRequest = Symbol();
 		const requestSessionRevision = sessionRevision;
 		activeTopicRequests.add(statusRequest);
-		request.ctx.ui.setStatus("session-topic", request.ctx.ui.theme.fg("dim", "summarizing…"));
+		request.ctx.ui.setStatus("session-topic", request.ctx.ui.theme.fg("dim", "[summarizing…]"));
 		try {
 			return await dependencies.generateTopic(
 				model,
