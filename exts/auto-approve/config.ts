@@ -83,7 +83,7 @@ export interface AutoApproveConfig {
 }
 
 const DEFAULT_EVALUATOR: EvaluatorConfig = {
-	reasoningEffort: "low",
+	reasoningEffort: "medium",
 	timeoutMs: 8000,
 	memoize: true,
 };

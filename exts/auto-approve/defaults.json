@@ -29,7 +29,7 @@
   ],
   "writeRoots": ["/tmp"],
   "evaluator": {
-    "reasoningEffort": "low",
+    "reasoningEffort": "medium",
     "timeoutMs": 20000,
     "memoize": true
   }

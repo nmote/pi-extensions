@@ -110,7 +110,9 @@ configured roots, excluding Git/Hg metadata. Global skill reads are in scope.
 `manual` prompts for unmatched calls, `auto` evaluates them, and `yolo` allows
 them; deny rules apply in every mode. `/auto`, `/auto manual|auto|yolo`,
 `/auto effort`, `/auto test`, and `/auto stats` inspect/control policy. `--auto`
-overrides startup mode. Evaluator failure/review never grants access; prompts
+overrides startup mode. Evaluator effort defaults to `medium`; override it with
+`/auto effort low|medium|high` or `evaluator.reasoningEffort` in config.
+Evaluator failure/review never grants access; prompts
 without a usable UI block. **This is not an OS sandbox.**
 
 `/small-model` selects the shared approval/topic model from authenticated models;

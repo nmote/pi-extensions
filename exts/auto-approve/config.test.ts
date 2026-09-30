@@ -67,8 +67,12 @@ try {
 		process.env.PI_CODING_AGENT_DIR = join(files, "agent");
 		const localConfig = join(process.env.PI_CODING_AGENT_DIR, "extensions", "auto-approve.json");
 		check("loading without a session does not seed policy", JSON.stringify(loadConfig()) === JSON.stringify(DEFAULTS));
+		check("engine effort defaults to medium", loadConfig().evaluator.reasoningEffort === "medium");
 		loadConfig({ seed: true });
 		check("session loading seeds and loads policy", loadConfig().allow.length === preset.allow.length);
+		check("bundled effort defaults to medium", loadConfig().evaluator.reasoningEffort === "medium");
+		writeFileSync(localConfig, '{"imports":["builtin:defaults"],"evaluator":{"reasoningEffort":"low"}}');
+		check("explicit effort overrides the bundled default", loadConfig().evaluator.reasoningEffort === "low");
 		writeFileSync(localConfig, "{}");
 		check("intentionally empty policy uses only engine defaults", JSON.stringify(loadConfig({ seed: true })) === JSON.stringify(DEFAULTS));
 		writeFileSync(localConfig, '{"imports":["builtin:defaults","builtin:bad"],"allow":[{"tool":"bash","pattern":".*"}]}');
