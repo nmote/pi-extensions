@@ -57,24 +57,62 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 		pending.push(...(neighbors.get(id) ?? []));
 	}
 
+	const ids = [...selected].sort();
+	const children = new Map<string, string[]>();
+	for (const id of ids) {
+		const parent = snapshot.items.get(id)?.item.parent;
+		if (parent) {
+			if (!children.has(parent)) children.set(parent, []);
+			children.get(parent)!.push(id);
+		}
+	}
+	const ancestors = (id: string): Set<string> => {
+		const seen = new Set<string>([id]);
+		let parent = snapshot.items.get(id)?.item.parent;
+		while (parent) {
+			if (seen.has(parent)) throw new Error(`parent cycle involving backlog item ${parent}; cannot render containment`);
+			seen.add(parent);
+			parent = snapshot.items.get(parent)?.item.parent;
+		}
+		return seen;
+	};
+	const lineage = new Map(ids.map((id) => [id, ancestors(id)]));
+	const dependencyEdges = [...edges].sort().filter((edge) => edge.startsWith("dependency:"))
+		.map((edge) => edge.split(":").slice(1) as [string, string])
+		.filter(([from, to]) => selected.has(from) && selected.has(to))
+		.filter(([from, to]) => !lineage.get(to)!.has(from) && !lineage.get(from)!.has(to));
+	const endpoints = new Set(dependencyEdges.flat());
 	const unreadable: string[] = [];
 	const lines = [
 		"digraph backlog {",
-		"  graph [rankdir=LR, labelloc=b, label=\"Solid: parent to child    Dashed: prerequisite to dependent\"];",
+		"  graph [rankdir=LR, ranksep=1, compound=true, fontname=Helvetica, labelloc=b, label=\"Boxes: parent contains children    Dashed: prerequisite to dependent\"];",
 		"  node [shape=box, style=filled, fontname=Helvetica];",
 	];
-	for (const id of [...selected].sort()) {
+	const emit = (id: string, indent: string): void => {
 		const item = snapshot.items.get(id)?.item;
-		if (!item) unreadable.push(id);
 		const label = item ? `${id}\n${item.title}\n[${item.status}]\nRepos: ${item.repos.join(", ")}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
 		const fill = item ? STATUS_COLORS[item.status] : "#ffcccc";
-		lines.push(`  ${quote(id)} [label=${quote(label)}, fillcolor=${quote(fill)}];`);
-	}
-	for (const edge of [...edges].sort()) {
-		const [kind, from, to] = edge.split(":");
-		if (selected.has(from!) && selected.has(to!)) {
-			lines.push(`  ${quote(from!)} -> ${quote(to!)} [style=${kind === "parent" ? "solid" : "dashed"}];`);
+		if (children.has(id)) {
+			lines.push(`${indent}subgraph ${quote(`cluster_${id}`)} {`);
+			lines.push(`${indent}  graph [label=${quote(label)}, labelloc=t, style="rounded,filled", fillcolor=${quote(fill)}, color="#888888", margin=16];`);
+			if (endpoints.has(id)) {
+				lines.push(`${indent}  ${quote(id)} [label="", shape=point, width=0.08, style=invis];`);
+			}
+			for (const child of children.get(id)!) emit(child, `${indent}  `);
+			lines.push(`${indent}}`);
+		} else {
+			lines.push(`${indent}${quote(id)} [label=${quote(label)}, fillcolor=${quote(fill)}];`);
 		}
+	};
+	for (const id of ids) {
+		if (!snapshot.items.has(id)) unreadable.push(id);
+		if (!snapshot.items.get(id)?.item.parent) emit(id, "  ");
+	}
+	for (const [from, to] of dependencyEdges) {
+		const attributes = ["style=dashed"];
+		if (children.has(from)) attributes.push(`ltail=${quote(`cluster_${from}`)}`);
+		if (children.has(to)) attributes.push(`lhead=${quote(`cluster_${to}`)}`);
+		lines.push(`  ${quote(from)} -> ${quote(to)} [${attributes.join(", ")}];`);
 	}
 	lines.push("}");
 	return { dot: lines.join("\n") + "\n", count: selected.size, unreadable };

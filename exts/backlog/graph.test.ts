@@ -59,9 +59,12 @@ check(
 	graph.count === 7 && !graph.dot.includes("hh0008") && graph.dot.includes("ee0005") && graph.dot.includes("cc0003"),
 );
 check(
-	"draws both directed relationship types even when their union has a cycle",
-	graph.dot.includes('"aa0001" -> "bb0002" [style=solid]') &&
-		graph.dot.includes('"bb0002" -> "aa0001" [style=dashed]') &&
+	"uses containment and omits ancestor dependencies without changing selection",
+	graph.dot.includes('subgraph "cluster_aa0001" {') &&
+		!graph.dot.includes('"aa0001" -> "bb0002"') &&
+		!graph.dot.includes("style=solid") &&
+		!graph.dot.includes('"bb0002" -> "aa0001"') &&
+		!graph.dot.includes("Dots:") &&
 		graph.dot.includes('"cc0003" -> "ee0005" [style=dashed]'),
 );
 check(
@@ -91,6 +94,56 @@ const longChain = Array.from({ length: MAX_GRAPH_NODES + 1 }, (_, index) =>
 check(
 	"refuses an oversized component instead of silently truncating it",
 	/exceeds 200 items/.test(errorOf(() => backlogGraph(snapshot(longChain), "000001"))),
+);
+
+const hierarchy = [
+	item("aa0001", { title: 'Parent "title"', status: "approved", repos: ["~/one", "~/two"], dependsOn: ["dd0004"] }),
+	item("bb0002", { parent: "aa0001", dependsOn: ["aa0001", "ee0005"] }),
+	item("cc0003", { parent: "bb0002", dependsOn: ["bb0002"] }),
+	item("dd0004", { dependsOn: ["bb0002"] }),
+	item("ee0005", { parent: "dd0004", dependsOn: ["cc0003"] }),
+];
+const nested = backlogGraph(snapshot(hierarchy), "cc0003");
+check(
+	"nests parent boxes with complete metadata and emits each item once",
+	nested.dot.includes('    subgraph "cluster_bb0002" {') &&
+		nested.dot.includes('      "cc0003" [label=') &&
+		nested.dot.includes('label="aa0001\\nParent \\"title\\"\\n[approved]\\nRepos: ~/one, ~/two"') &&
+		(nested.dot.match(/label="aa0001/g) ?? []).length === 1 &&
+		nested.count === 5,
+);
+check(
+	"clips external parent dependencies and omits ancestor dependencies",
+	nested.dot.includes('"dd0004" -> "aa0001" [style=dashed, ltail="cluster_dd0004", lhead="cluster_aa0001"]') &&
+		nested.dot.includes('"bb0002" -> "dd0004" [style=dashed, ltail="cluster_bb0002", lhead="cluster_dd0004"]') &&
+		nested.dot.includes('"ee0005" -> "bb0002" [style=dashed, lhead="cluster_bb0002"]') &&
+		!nested.dot.includes('"aa0001" -> "bb0002"') &&
+		!nested.dot.includes('"bb0002" -> "cc0003"') &&
+		nested.dot.includes('"cc0003" -> "ee0005" [style=dashed]') &&
+		nested.dot.includes('"aa0001" [label="", shape=point, width=0.08, style=invis]') &&
+		nested.dot.includes('"dd0004" [label="", shape=point, width=0.08, style=invis]') &&
+		(nested.dot.match(/ -> /g) ?? []).length === 4,
+);
+check(
+	"generates deterministic DOT regardless of snapshot order or selected root",
+	nested.dot === backlogGraph(snapshot([...hierarchy].reverse()), "dd0004").dot,
+);
+const unreadableParents = backlogGraph(snapshot([
+	item("aa0001", { parent: "bb0002", dependsOn: ["cc0003"] }),
+	item("dd0004", { parent: "cc0003" }),
+], [["cc0003", "bad frontmatter"]]), "aa0001");
+check(
+	"encloses children of missing and malformed parents without inventing metadata",
+	unreadableParents.unreadable.join() === "bb0002,cc0003" &&
+		unreadableParents.dot.includes('subgraph "cluster_bb0002" {\n    graph [label="bb0002\\n(missing)"') &&
+		unreadableParents.dot.includes('subgraph "cluster_cc0003" {\n    graph [label="cc0003\\n(malformed)"'),
+);
+check(
+	"rejects parent cycles in hand-edited snapshots",
+	/parent cycle/.test(errorOf(() => backlogGraph(snapshot([
+		item("aa0001", { parent: "bb0002" }), item("bb0002", { parent: "aa0001" }),
+	]), "aa0001"))) &&
+		/parent cycle/.test(errorOf(() => backlogGraph(snapshot([item("aa0001", { parent: "aa0001" })]), "aa0001"))),
 );
 
 const dir = mkdtempSync(join(tmpdir(), "backlog-graph-test-"));

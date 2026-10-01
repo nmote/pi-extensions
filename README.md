@@ -74,6 +74,14 @@ Configuration and state are independent of the package checkout.
 - [examples/](examples/) contains optional neutral configuration and a named
   agent. Nothing there is installed automatically.
 
+### Backlog graphs
+
+`/backlog-graph <item ID>` opens the item's connected component as an SVG.
+Parent boxes enclose their children, with nested boxes for deeper hierarchies.
+Dashed arrows run from prerequisite to dependent; dependencies between an
+ancestor and descendant are omitted. Labels show IDs, titles, statuses, and
+repositories. Graphs require Graphviz `dot` and a graphical viewer.
+
 ### Reusable subagents
 
 Successful subagents remain idle within the parent session. Use
