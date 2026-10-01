@@ -7,6 +7,7 @@ import type { BacklogStatus, BacklogStore, StoreSnapshot } from "./store.ts";
 
 const execFile = promisify(execFileCallback);
 export const MAX_GRAPH_NODES = 200;
+export type GraphFormat = "svg" | "png";
 
 const STATUS_COLORS: Record<BacklogStatus, string> = {
 	open: "#e6f2ff",
@@ -118,15 +119,15 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 	return { dot: lines.join("\n") + "\n", count: selected.size, unreadable };
 }
 
-/** Keep the output in a private temp directory so a browser can read it after the command finishes. */
-export async function renderGraphSvg(dot: string): Promise<string> {
+/** Keep the output in a private temp directory so a viewer can read it after the command finishes. */
+export async function renderGraph(dot: string, format: GraphFormat = "svg"): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-backlog-graph-"));
 	const input = join(dir, "graph.dot");
-	const output = join(dir, "graph.svg");
+	const output = join(dir, `graph.${format}`);
 	try {
 		await writeFile(input, dot, { mode: 0o600 });
 		try {
-			await execFile("dot", ["-Tsvg", "-o", output, input], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+			await execFile("dot", [`-T${format}`, "-o", output, input], { timeout: 10_000, maxBuffer: 1024 * 1024 });
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 				throw new Error("Graphviz `dot` is not installed (install graphviz to render backlog graphs)");
@@ -141,7 +142,7 @@ export async function renderGraphSvg(dot: string): Promise<string> {
 	}
 }
 
-export async function openGraphSvg(path: string): Promise<void> {
+export async function openGraph(path: string): Promise<void> {
 	const opener = process.platform === "darwin" ? "open" : "xdg-open";
 	await execFile(opener, [path], { timeout: 5_000, maxBuffer: 1024 * 1024 });
 }
@@ -149,11 +150,12 @@ export async function openGraphSvg(path: string): Promise<void> {
 export async function openBacklogGraph(
 	store: BacklogStore,
 	id: string,
-	render: (dot: string) => Promise<string> = renderGraphSvg,
-	open: (path: string) => Promise<void> = openGraphSvg,
+	format: GraphFormat = "svg",
+	render: (dot: string, format: GraphFormat) => Promise<string> = renderGraph,
+	open: (path: string) => Promise<void> = openGraph,
 ): Promise<{ path: string; count: number; unreadable: string[]; openError?: string }> {
 	const graph = backlogGraph(await store.load(), id);
-	const path = await render(graph.dot);
+	const path = await render(graph.dot, format);
 	try {
 		await open(path);
 		return { path, count: graph.count, unreadable: graph.unreadable };

@@ -24,7 +24,7 @@ import {
 	runBacklogOperations,
 	statusSummary,
 } from "./operations.ts";
-import { openBacklogGraph } from "./graph.ts";
+import { type GraphFormat, openBacklogGraph } from "./graph.ts";
 import { abbreviateHome } from "./repo.ts";
 import { BACKLOG_STATUSES, BacklogStore, backlogDir, isItemId } from "./store.ts";
 
@@ -93,6 +93,14 @@ function operationContext(ctx: ExtensionContext): OperationContext {
 	return { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), subagent: Boolean(process.env[SUBAGENT_RUN_ID_ENV]) };
 }
 
+export function parseGraphArgs(args: string): { id: string; format: GraphFormat } | undefined {
+	const tokens = args.trim().split(/\s+/);
+	const png = tokens.includes("--png");
+	const ids = tokens.filter((token) => token !== "--png");
+	if (tokens.length !== (png ? 2 : 1) || ids.length !== 1 || !isItemId(ids[0])) return undefined;
+	return { id: ids[0], format: png ? "png" : "svg" };
+}
+
 export default function backlog(pi: ExtensionAPI): void {
 	const store = new BacklogStore(backlogDir());
 
@@ -144,16 +152,16 @@ export default function backlog(pi: ExtensionAPI): void {
 	);
 
 	pi.registerCommand("backlog-graph", {
-		description: "Open the connected backlog graph containing an item ID",
+		description: "Open the connected backlog graph containing an item ID (SVG, or --png)",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
-			const id = args.trim();
-			if (!isItemId(id)) {
-				ctx.ui.notify("Usage: /backlog-graph <item ID>", "error");
+			const parsed = parseGraphArgs(args);
+			if (!parsed) {
+				ctx.ui.notify("Usage: /backlog-graph <item ID> [--png]", "error");
 				return;
 			}
 			try {
-				const graph = await openBacklogGraph(store, id);
+				const graph = await openBacklogGraph(store, parsed.id, parsed.format);
 				const warning = graph.unreadable.length ? ` Unreadable linked items: ${graph.unreadable.join(", ")}.` : "";
 				if (graph.openError) {
 					ctx.ui.notify(`Graph saved at ${graph.path}, but could not open it: ${graph.openError}.${warning}`, "warning");

@@ -77,6 +77,8 @@ Configuration and state are independent of the package checkout.
 ### Backlog graphs
 
 `/backlog-graph <item ID>` opens the item's connected component as an SVG.
+Use `/backlog-graph <item ID> --png` for PNG output (`--png` can also precede
+the ID). The notification includes the saved file path, even if opening fails.
 Parent boxes enclose their children, with nested boxes for deeper hierarchies.
 Dashed arrows run from prerequisite to dependent; dependencies between an
 ancestor and descendant are omitted. Labels show IDs, titles, statuses, and

@@ -1,7 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { backlogGraph, MAX_GRAPH_NODES, openBacklogGraph } from "./graph.ts";
+import { dirname, join } from "node:path";
+import { backlogGraph, MAX_GRAPH_NODES, openBacklogGraph, renderGraph, type GraphFormat } from "./graph.ts";
 import { BacklogStore, formatItem, type BacklogItem, type StoreSnapshot } from "./store.ts";
 
 let failures = 0;
@@ -155,7 +156,9 @@ try {
 	const result = await openBacklogGraph(
 		store,
 		"aa0001",
-		async (dot) => {
+		undefined,
+		async (dot, format) => {
+			assert.equal(format, "svg");
 			rendered = dot;
 			return "/tmp/example.svg";
 		},
@@ -169,8 +172,53 @@ try {
 			rendered.includes("aa0001") &&
 			readFileSync(store.itemPath("aa0001"), "utf8") === original,
 	);
+	const png = await openBacklogGraph(store, "aa0001", "png", async (_dot, format) => {
+		assert.equal(format, "png");
+		return "/tmp/example.png";
+	}, async (path) => { assert.equal(path, "/tmp/example.png"); });
+	assert.equal(png.path, "/tmp/example.png");
+	assert.equal(png.openError, undefined);
 } finally {
 	rmSync(dir, { recursive: true, force: true });
+}
+
+const fixture = mkdtempSync(join(tmpdir(), "backlog-render-test-"));
+const previousPath = process.env.PATH;
+const previousLog = process.env.PI_GRAPH_TEST_LOG;
+try {
+	const log = join(fixture, "args");
+	process.env.PI_GRAPH_TEST_LOG = log;
+	process.env.PATH = `${fixture}:${previousPath ?? ""}`;
+	writeFileSync(join(fixture, "dot"), `#!/bin/sh
+printf '%s\\n' "$@" > "$PI_GRAPH_TEST_LOG"
+if grep -q 'fail-render' "$4"; then exit 1; fi
+cp "$4" "$3"
+`, { mode: 0o700 });
+	for (const format of ["svg", "png"] as GraphFormat[]) {
+		const dot = "digraph { a -> b }";
+		const output = await renderGraph(dot, format === "svg" ? undefined : format);
+		try {
+			assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+				`-T${format}`, "-o", output, join(dirname(output), "graph.dot"),
+			]);
+			assert.equal(output, join(dirname(output), `graph.${format}`));
+			assert.equal(readFileSync(output, "utf8"), dot);
+			assert.equal(statSync(output).mode & 0o777, 0o600);
+			assert.equal(statSync(join(dirname(output), "graph.dot")).mode & 0o777, 0o600);
+			assert.equal(statSync(dirname(output)).mode & 0o777, 0o700);
+		} finally {
+			rmSync(dirname(output), { recursive: true, force: true });
+		}
+	}
+	await assert.rejects(renderGraph("fail-render", "png"));
+	const failedOutput = readFileSync(log, "utf8").trim().split("\n")[2];
+	assert.equal(existsSync(dirname(failedOutput)), false);
+} finally {
+	if (previousPath === undefined) delete process.env.PATH;
+	else process.env.PATH = previousPath;
+	if (previousLog === undefined) delete process.env.PI_GRAPH_TEST_LOG;
+	else process.env.PI_GRAPH_TEST_LOG = previousLog;
+	rmSync(fixture, { recursive: true, force: true });
 }
 
 if (failures) {
