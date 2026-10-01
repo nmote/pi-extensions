@@ -97,6 +97,26 @@ check(
 	/exceeds 200 items/.test(errorOf(() => backlogGraph(snapshot(longChain), "000001"))),
 );
 
+for (const [status, leaf, dark, light] of [
+	["open", "#e6f2ff", "#dcecff", "#ecf5ff"],
+	["approved", "#d6f5db", "#c9efcf", "#e0f8e4"],
+	["in_progress", "#fff1c2", "#ffecad", "#fff4cf"],
+	["done", "#e8e8e8", "#dedede", "#eeeeee"],
+	["dropped", "#f7dddd", "#f2d0d0", "#fae5e5"],
+] as const) {
+	const shaded = backlogGraph(snapshot([
+		item("aa0001", { status }),
+		item("bb0002", { status, parent: "aa0001" }),
+		item("cc0003", { status, parent: "bb0002" }),
+		item("dd0004", { status, parent: "cc0003" }),
+	]), "dd0004");
+	const fills = [...shaded.dot.matchAll(/fillcolor="(#[a-f0-9]+)"/g)].map((match) => match[1]);
+	check(
+		`${status} alternates parent shades by depth and preserves the leaf color`,
+		fills.join() === [dark, light, dark, leaf].join(),
+	);
+}
+
 const hierarchy = [
 	item("aa0001", { title: 'Parent "title"', status: "approved", repos: ["~/one", "~/two"], dependsOn: ["dd0004"] }),
 	item("bb0002", { parent: "aa0001", dependsOn: ["aa0001", "ee0005"] }),

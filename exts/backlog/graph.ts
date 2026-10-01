@@ -9,12 +9,12 @@ const execFile = promisify(execFileCallback);
 export const MAX_GRAPH_NODES = 200;
 export type GraphFormat = "svg" | "png";
 
-const STATUS_COLORS: Record<BacklogStatus, string> = {
-	open: "#e6f2ff",
-	approved: "#d6f5db",
-	in_progress: "#fff1c2",
-	done: "#e8e8e8",
-	dropped: "#f7dddd",
+const STATUS_COLORS: Record<BacklogStatus, { leaf: string; parents: [string, string] }> = {
+	open: { leaf: "#e6f2ff", parents: ["#dcecff", "#ecf5ff"] },
+	approved: { leaf: "#d6f5db", parents: ["#c9efcf", "#e0f8e4"] },
+	in_progress: { leaf: "#fff1c2", parents: ["#ffecad", "#fff4cf"] },
+	done: { leaf: "#e8e8e8", parents: ["#dedede", "#eeeeee"] },
+	dropped: { leaf: "#f7dddd", parents: ["#f2d0d0", "#fae5e5"] },
 };
 
 function quote(value: string): string {
@@ -105,17 +105,18 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 		"  graph [rankdir=LR, ranksep=1, compound=true, fontname=Helvetica, labelloc=b, label=\"Boxes: parent contains children    Dashed: prerequisite to dependent\"];",
 		"  node [shape=box, style=\"rounded,filled\", fontname=Helvetica, margin=\"0.25,0.12\", color=\"#888888\"];",
 	];
-	const emit = (id: string, indent: string): void => {
+	const emit = (id: string, indent: string, depth: number): void => {
 		const item = snapshot.items.get(id)?.item;
 		const label = item ? `${id} [${item.status}]\n${wrapLabel(item.title)}\n${wrapLabel(`Repos: ${item.repos.join(", ")}`)}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
-		const fill = item ? STATUS_COLORS[item.status] : "#ffcccc";
+		const colors = item ? STATUS_COLORS[item.status] : undefined;
+		const fill = colors ? (children.has(id) ? colors.parents[depth % 2] : colors.leaf) : "#ffcccc";
 		if (children.has(id)) {
 			lines.push(`${indent}subgraph ${quote(`cluster_${id}`)} {`);
 			lines.push(`${indent}  graph [label=${quote(label)}, labelloc=t, style="rounded,filled", fillcolor=${quote(fill)}, color="#888888", margin=16];`);
 			if (endpoints.has(id)) {
 				lines.push(`${indent}  ${quote(id)} [label="", shape=point, width=0.08, style=invis];`);
 			}
-			for (const child of children.get(id)!) emit(child, `${indent}  `);
+			for (const child of children.get(id)!) emit(child, `${indent}  `, depth + 1);
 			lines.push(`${indent}}`);
 		} else {
 			lines.push(`${indent}${quote(id)} [label=${quote(label)}, fillcolor=${quote(fill)}];`);
@@ -123,7 +124,7 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 	};
 	for (const id of ids) {
 		if (!snapshot.items.has(id)) unreadable.push(id);
-		if (!snapshot.items.get(id)?.item.parent) emit(id, "  ");
+		if (!snapshot.items.get(id)?.item.parent) emit(id, "  ", 0);
 	}
 	for (const [from, to] of dependencyEdges) {
 		const attributes = ["style=dashed"];
