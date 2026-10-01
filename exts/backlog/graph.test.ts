@@ -70,13 +70,13 @@ check(
 );
 check(
 	"quotes title text instead of accepting DOT syntax or Graphviz escapes",
-	graph.dot.includes('label="cc0003\\nQuote \\"hello\\" \\\\N <x>\\n[done]\\nRepos: ~/two"') &&
+	graph.dot.includes('label="cc0003 [done]\\nQuote \\"hello\\" \\\\N <x>\\nRepos: ~/two"') &&
 		graph.dot.includes('fillcolor="#e8e8e8"'),
 );
 check(
 	"shows every repository associated with each item",
-	graph.dot.includes('label="aa0001\\naa0001\\n[open]\\nRepos: ~/one"') &&
-		graph.dot.includes('label="dd0004\\ndd0004\\n[in_progress]\\nRepos: ~/one, ~/two"'),
+	graph.dot.includes('label="aa0001 [open]\\naa0001\\nRepos: ~/one"') &&
+		graph.dot.includes('label="dd0004 [in_progress]\\ndd0004\\nRepos: ~/one, ~/two"'),
 );
 check(
 	"shows missing and malformed linked nodes without inventing details",
@@ -109,7 +109,7 @@ check(
 	"nests parent boxes with complete metadata and emits each item once",
 	nested.dot.includes('    subgraph "cluster_bb0002" {') &&
 		nested.dot.includes('      "cc0003" [label=') &&
-		nested.dot.includes('label="aa0001\\nParent \\"title\\"\\n[approved]\\nRepos: ~/one, ~/two"') &&
+		nested.dot.includes('label="aa0001 [approved]\\nParent \\"title\\"\\nRepos: ~/one, ~/two"') &&
 		(nested.dot.match(/label="aa0001/g) ?? []).length === 1 &&
 		nested.count === 5,
 );

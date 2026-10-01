@@ -107,7 +107,7 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 	];
 	const emit = (id: string, indent: string): void => {
 		const item = snapshot.items.get(id)?.item;
-		const label = item ? `${id}\n${wrapLabel(item.title)}\n[${item.status}]\n${wrapLabel(`Repos: ${item.repos.join(", ")}`)}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
+		const label = item ? `${id} [${item.status}]\n${wrapLabel(item.title)}\n${wrapLabel(`Repos: ${item.repos.join(", ")}`)}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
 		const fill = item ? STATUS_COLORS[item.status] : "#ffcccc";
 		if (children.has(id)) {
 			lines.push(`${indent}subgraph ${quote(`cluster_${id}`)} {`);
