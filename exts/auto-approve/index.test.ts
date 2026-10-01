@@ -81,6 +81,33 @@ async function main(): Promise<void> {
 		};
 		autoApprove(pi as any);
 
+		const promptHook = handlers.get("before_agent_start")?.[0];
+		if (!promptHook) throw new Error("before_agent_start handler was not registered");
+		const promptEvent = {
+			systemPrompt: "base prompt",
+			systemPromptOptions: {
+				selectedTools: ["bash", "edit"],
+				promptGuidelines: ["Existing guidance"],
+				sections: { other: "Other context" },
+			},
+		};
+		check("prompt hook does not replace the system prompt", promptHook(promptEvent, {}) === undefined);
+		const guidelines = promptEvent.systemPromptOptions.promptGuidelines;
+		check(
+			"inline-script guidance is general even without the approval tool",
+			guidelines.length === 2 && guidelines[0] === "Existing guidance" &&
+				guidelines[1].includes("small ad-hoc scripts") &&
+				guidelines[1].includes("python3 - <<'EOF'") &&
+				guidelines[1].includes("Prefer `edit`") &&
+				promptEvent.systemPrompt === "base prompt" &&
+				promptEvent.systemPromptOptions.sections.other === "Other context",
+		);
+		promptHook(promptEvent, {});
+		check("repeated prompt hooks do not accumulate guidance", guidelines.length === 2);
+		const freshEvent = { systemPromptOptions: { promptGuidelines: [] as string[] } };
+		promptHook(freshEvent, {});
+		check("fresh turns receive the same guidance", freshEvent.systemPromptOptions.promptGuidelines[0] === guidelines[1]);
+
 		const scope = scopeInstruction(
 			"/workspace",
 			["../configured-write"],

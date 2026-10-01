@@ -64,6 +64,7 @@ import { ensureSmallModel, loadSmallModel } from "../shared/small-model.ts";
 
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const APPROVAL_TOOL = "request_tool_approval";
+const INLINE_SCRIPT_GUIDELINE = "Run small ad-hoc scripts inline using a quoted heredoc (e.g. `python3 - <<'EOF'`) rather than writing and executing a temporary script, so the approval evaluator can inspect the full body. Prefer `edit` for small, targeted file changes.";
 const APPROVAL_REQUEST_TTL_MS = 10 * 60 * 1000;
 const MEMO_ENTRY = "auto-approve-memo";
 const HUMAN_DENY_ENTRY = "auto-approve-human-deny";
@@ -405,6 +406,11 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				details: {},
 			};
 		},
+	});
+
+	pi.on("before_agent_start", (event) => {
+		const guidelines = event.systemPromptOptions.promptGuidelines;
+		if (!guidelines.includes(INLINE_SCRIPT_GUIDELINE)) guidelines.push(INLINE_SCRIPT_GUIDELINE);
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
