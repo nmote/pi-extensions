@@ -5,6 +5,7 @@
     { "tool": "cloud_agent_status", "description": "Read-only: cloud agent status" },
     { "tool": "cloud_agent_apply", "description": "Apply a Codex diff only to a clean Git worktree; no commit, push, or PR" },
     { "tool": "list_models", "description": "Read-only: enumerate available models" },
+    { "tool": "tool_search", "description": "Discover tool metadata without executing tools" },
     { "tool": "request_tool_approval", "description": "Escalate a rejected tool call for human approval" },
     { "tool": "session_notes", "description": "Transient session notes" },
     { "tool": "session_todos", "description": "Transient session todos" },
