@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -14,6 +14,7 @@ import {
 import { formatSpawnCall, summarizePurpose } from "./purpose.ts";
 import subagents from "./index.ts";
 import { SubagentManager } from "./manager.ts";
+import { restoreSubagents, SUBAGENT_STATE_ENTRY } from "./state.ts";
 import { createProgressReporter, type SubagentDetails } from "./progress.ts";
 import {
 	formatCost,
@@ -34,6 +35,7 @@ function check(name: string, condition: boolean): void {
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const fixture = join(testDir, "fixtures/fake-rpc-child.mjs");
+const childStopped = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
 const task = (text: string): ResolvedSubagentTask => ({
 	task: text,
 	agent: "general",
@@ -128,17 +130,26 @@ try {
 	check("empty catalog is explicit", formatNamedAgentCatalog({ directory: "/agents", agents: [], errors: [] }) === "Agent directory: /agents\n\nNamed subagents:\nnone");
 
 	const shutdowns: Array<() => Promise<void>> = [];
-	const register = () => {
+	const register = (entries: any[] = []) => {
 		const tools = new Map<string, any>();
 		let beginTurn = () => {};
 		let beginSession = (_ctx: ExtensionContext) => {};
+		let endSession = async () => {};
 		let approvalMode = "yolo";
+		let failPersistence = false;
 		const pi = {
 			registerTool(tool: any) { tools.set(tool.name, tool); },
 			registerCommand() {},
+			appendEntry(customType: string, data: unknown) {
+				if (failPersistence) throw new Error("disk full");
+				entries.push({ type: "custom", customType, data });
+			},
 			on(event: string, handler: (...args: any[]) => any) {
-				if (event === "session_start") beginSession = (ctx) => handler({}, ctx);
-				if (event === "session_shutdown") shutdowns.push(handler);
+				if (event === "session_start") beginSession = (ctx) => handler({}, { ...ctx, sessionManager: { getBranch: () => entries } });
+				if (event === "session_shutdown") {
+					endSession = () => handler({}, context());
+					shutdowns.push(endSession);
+				}
 				if (event === "turn_start") beginTurn = handler;
 			},
 			events: { emit(name: string, request: any) {
@@ -152,7 +163,7 @@ try {
 		} finally {
 			process.argv[1] = originalScript;
 		}
-		return { tools, beginSession, beginTurn: () => beginTurn(), setMode: (mode: string) => { approvalMode = mode; } };
+		return { tools, beginSession, shutdown: () => endSession(), beginTurn: () => beginTurn(), setMode: (mode: string) => { approvalMode = mode; }, failPersistence: () => { failPersistence = true; } };
 	};
 	try {
 		const { tools, beginSession, beginTurn, setMode } = register();
@@ -211,6 +222,62 @@ try {
 		check("a new runtime discovers an absent default directory", emptyCatalog.content[0]?.text === formatNamedAgentCatalog({ directory: join(agentDir, "agents"), agents: [], errors: [] }));
 		const emptyGeneral = await emptyRuntime.get("subagent").execute("general", { task: "done general" }, undefined, undefined, ctx);
 		check("general delegation needs no named definitions", emptyGeneral.details.results[0]?.agent === "general" && emptyGeneral.details.results[0]?.output === "done");
+
+		const entries: any[] = [];
+		let runtime = register(entries);
+		runtime.beginSession(ctx as unknown as ExtensionContext);
+		const initial = await runtime.tools.get("subagent").execute("persistent", { task: "recall persistent", model: "fake/fake-model", thinkingLevel: "low" }, undefined, undefined, ctx);
+		const persistentId = initial.details.results[0].id;
+		let previousInfo = JSON.parse(initial.details.results[0].output);
+		const initialPrompt = await readFile(previousInfo.args[previousInfo.args.indexOf("--append-system-prompt") + 1], "utf8");
+		for (const boundary of ["reload", "resume"]) {
+			await runtime.shutdown();
+			check(`${boundary} stops the old child`, childStopped(previousInfo.pid));
+			runtime = register(entries);
+			runtime.beginSession(ctx as unknown as ExtensionContext);
+			const restoredStatus = await runtime.tools.get("subagent_status").execute("status", { id: persistentId });
+			check(`${boundary} restores the original idle ID and configuration`, restoredStatus.details.results[0].status === "idle" && restoredStatus.details.results[0].thinkingLevel === "low");
+			runtime.setMode("manual");
+			const followup = await runtime.tools.get("subagent_continue").execute("followup", { id: persistentId, task: `recall after ${boundary}` }, undefined, undefined, ctx);
+			const info = JSON.parse(followup.details.results[0].output);
+			check(`${boundary} reopens retained history with current approval policy`, info.pid !== previousInfo.pid && info.mode === "manual" && info.history[0].text === "Task: recall persistent");
+			check(`${boundary} retains launch settings and instructions`, info.args[info.args.indexOf("--model") + 1] === "fake/fake-model" && info.args[info.args.indexOf("--thinking") + 1] === "low" && await readFile(info.args[info.args.indexOf("--append-system-prompt") + 1], "utf8") === initialPrompt);
+			check(`${boundary} accounts only new usage`, followup.usage.totalTokens === 18 && followup.details.results[0].totalUsage.totalTokens === (boundary === "reload" ? 36 : 54));
+			previousInfo = info;
+		}
+		await runtime.tools.get("subagent_cancel").execute("cancel", { id: persistentId });
+		await runtime.shutdown();
+		runtime = register(entries);
+		runtime.beginSession(ctx as unknown as ExtensionContext);
+		check("cancellation stays permanent after restoration", (await errorMessage(runtime.tools.get("subagent_continue").execute("continue", { id: persistentId, task: "wrong" }, undefined, undefined, ctx))).includes("while cancelled"));
+
+		const stale = await runtime.tools.get("subagent").execute("stale", { task: "done" }, undefined, undefined, ctx);
+		const staleId = stale.details.results[0].id;
+		await runtime.shutdown();
+		const state = restoreSubagents(entries).find((run) => run.snapshot.id === staleId)!;
+		await rm(state.sessionDir, { recursive: true });
+		runtime = register(entries);
+		runtime.beginSession(ctx as unknown as ExtensionContext);
+		const missing = await runtime.tools.get("subagent_continue").execute("missing", { id: staleId, task: "do not rerun" }, undefined, undefined, ctx);
+		check("missing child sessions fail instead of starting fresh", missing.details.results[0].status === "failed" && missing.details.results[0].error.includes("Saved session") && !existsSync(state.sessionDir));
+		const waitingTask = await runtime.tools.get("subagent").execute("waiting", { task: "ask again" }, undefined, undefined, ctx);
+		const waitingId = waitingTask.details.results[0].id;
+		await runtime.shutdown();
+		runtime = register(entries);
+		runtime.beginSession(ctx as unknown as ExtensionContext);
+		const interrupted = await runtime.tools.get("subagent_status").execute("status", { id: waitingId });
+		check("restored questions require explicit continuation", interrupted.details.results[0].status === "idle" && interrupted.details.results[0].phase.includes("interrupted") && interrupted.details.results[0].question.question === "Which option?" && (await errorMessage(runtime.tools.get("subagent_reply").execute("reply", { id: waitingId, answer: "two" }, undefined, undefined, ctx))).includes("not waiting"));
+		const recovered = await runtime.tools.get("subagent_continue").execute("recover", { id: waitingId, task: "recall recovery" }, undefined, undefined, ctx);
+		check("interrupted questions retain context without automatic replay", recovered.details.results[0].status === "idle" && recovered.details.results[0].question === undefined && JSON.parse(recovered.details.results[0].output).history[0].text === "Task: ask again");
+		check("restoration rejects incompatible registry versions", (await errorMessage(Promise.resolve().then(() => restoreSubagents([{ type: "custom", customType: SUBAGENT_STATE_ENTRY, data: { version: 999, runs: [] } }] as any)))).includes("unsupported"));
+		const saveErrors: string[] = [];
+		const failingRuntime = register();
+		failingRuntime.beginSession(context({ notify: (message) => saveErrors.push(message) }));
+		failingRuntime.failPersistence();
+		const unsaved = await failingRuntime.tools.get("subagent").execute("unsaved", { task: "recall unsaved" }, undefined, undefined, ctx);
+		const unsavedInfo = JSON.parse(unsaved.details.results[0].output);
+		await failingRuntime.tools.get("subagent_cancel").execute("cancel", { id: unsaved.details.results[0].id });
+		check("persistence failures warn without blocking checkpoints or cleanup", saveErrors.some((message) => message.includes("disk full")) && childStopped(unsavedInfo.pid) && !existsSync(unsavedInfo.args[unsavedInfo.args.indexOf("--append-system-prompt") + 1]));
 	} finally {
 		await Promise.all(shutdowns.map((shutdown) => shutdown()));
 	}
@@ -372,7 +439,6 @@ try {
 	const cleanupTasks = await cleanup.start([task("recall one"), task("recall two")], process.cwd(), context());
 	const childInfo = cleanupTasks.map((result) => JSON.parse(result.output!));
 	const ended = await cleanup.cancel(cleanupTasks[0]!.id);
-	const childStopped = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
 	const promptPath = (info: any) => info.args[info.args.indexOf("--append-system-prompt") + 1];
 	check("ending idle child releases process and prompt", ended[0]?.status === "cancelled" && childStopped(childInfo[0].pid) && !existsSync(promptPath(childInfo[0])));
 	check("ending standby preserves completed-task timing", ended[0]?.taskEndedAt === cleanupTasks[0]?.taskEndedAt);

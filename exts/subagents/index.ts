@@ -31,6 +31,7 @@ import {
 	type SubagentTaskInput,
 } from "./agents.ts";
 import { SubagentManager, type SubagentSnapshot, type UsageTotals } from "./manager.ts";
+import { restoreSubagents, SUBAGENT_STATE_ENTRY, subagentState } from "./state.ts";
 import {
 	clearSubagentModel,
 	describeSubagentModelPolicy,
@@ -251,10 +252,21 @@ export default function subagents(pi: ExtensionAPI): void {
 	const manager = new SubagentManager({
 		onLiveCountChange: refreshStatus,
 		onAutoApproveStat: (stat) => pi.events.emit(AUTO_APPROVE_STAT_CHANNEL, { stat }),
+		onStateChange: (runs) => {
+			try {
+				pi.appendEntry(SUBAGENT_STATE_ENTRY, subagentState(runs));
+			} catch (error) {
+				// Persistence failures must not prevent child process cleanup.
+				const message = `Could not save subagent state: ${error instanceof Error ? error.message : String(error)}`;
+				if (statusContext?.hasUI) statusContext.ui.notify(message, "error");
+				else console.error(message);
+			}
+		},
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		statusContext = ctx;
+		manager.restore(restoreSubagents(ctx.sessionManager.getBranch()));
 		refreshStatus(manager.liveCount());
 	});
 

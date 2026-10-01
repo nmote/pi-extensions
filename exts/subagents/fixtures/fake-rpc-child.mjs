@@ -1,3 +1,10 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2);
+const sessionDir = args[args.indexOf("--session-dir") + 1];
+const sessionFile = args.includes("--session") ? args[args.indexOf("--session") + 1] : join(sessionDir, `fake_${args[args.indexOf("--session-id") + 1]}.jsonl`);
+const sessionId = args.includes("--session") ? JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]).id : args[args.indexOf("--session-id") + 1];
 const token = process.env.PI_SUBAGENT_TOKEN;
 let pending;
 let mode;
@@ -5,7 +12,11 @@ let acknowledgePolicy = true;
 let slowDiscovery = false;
 let slowPolicy = false;
 let straySettlement = false;
-const history = [];
+const history = existsSync(sessionFile) ? JSON.parse(readFileSync(sessionFile, "utf8").trim().split("\n")[1]).data : [];
+
+function persist() {
+	writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: process.cwd(), timestamp: new Date().toISOString() })}\n${JSON.stringify({ type: "custom", id: "history", parentId: null, timestamp: new Date().toISOString(), customType: "fake-history", data: history })}\n`);
+}
 
 function send(value) {
 	process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -42,6 +53,7 @@ function assistant(text, stopReason = "stop") {
 
 function finish(text) {
 	history.push({ role: "assistant", text });
+	persist();
 	send({ type: "message_end", message: assistant(text) });
 	send({ type: "agent_settled" });
 }
@@ -81,6 +93,7 @@ function processLine(line) {
 		if (command.message.includes("slow policy")) slowPolicy = true;
 		if (command.message.includes("stray settlement")) straySettlement = true;
 		history.push({ role: "user", text: command.message });
+		persist();
 		send({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "started" } });
 		send({ type: "agent_start" });
 		send({ type: "turn_start" });

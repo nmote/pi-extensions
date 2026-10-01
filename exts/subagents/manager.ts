@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext, RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager, type ExtensionContext, type RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import {
 	type AutoApproveStat,
 	isQuestionTitle,
@@ -16,6 +16,7 @@ import {
 } from "../shared/subagent-protocol.ts";
 import type { ResolvedSubagentTask } from "./agents.ts";
 import { type PiInvocation, resolvePiInvocation, RpcProcess } from "./rpc.ts";
+import type { PersistedSubagentRun } from "./state.ts";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const MAX_ACTIVITY_ITEMS = 50;
@@ -221,6 +222,10 @@ class SubagentRun {
 	readonly id: string;
 	readonly token = randomUUID();
 	private rpc?: RpcProcess;
+	private suspending = false;
+	private restoredQuestion?: SupervisorQuestion;
+	private readonly sessionId: string = randomUUID();
+	private readonly sessionDir = join(getAgentDir(), "subagents", this.sessionId);
 	private promptDir?: string;
 	private hooks?: OperationHooks;
 	private pendingQuestion?: PendingQuestion;
@@ -250,10 +255,44 @@ class SubagentRun {
 		private readonly invocation: PiInvocation,
 		private readonly routeUi: (run: SubagentRun, request: RpcExtensionUIRequest) => Promise<void>,
 		private readonly onStatusChange: () => void,
+		private readonly onStateChange: () => void,
+		state?: PersistedSubagentRun,
 	) {
 		this.id = id;
 		this.currentTask = task.task;
 		this.pushActivity(this.phase);
+		if (state) {
+			this.sessionId = state.sessionId;
+			this.sessionDir = state.sessionDir;
+			this.currentTask = state.snapshot.task;
+			this.taskNumber = state.snapshot.taskNumber;
+			this.startedAt = state.snapshot.startedAt;
+			this.taskEndedAt = state.snapshot.taskEndedAt;
+			this.updatedAt = state.snapshot.updatedAt;
+			this.output = state.snapshot.output;
+			this.error = state.snapshot.error;
+			this.usage = structuredClone(state.snapshot.usage);
+			Object.assign(this.totalUsage, structuredClone(state.snapshot.totalUsage));
+			this.accountedUsage = structuredClone(state.accountedUsage);
+			this.status = state.snapshot.status;
+			this.phase = state.snapshot.phase;
+			this.activity.splice(0, this.activity.length, ...structuredClone(state.snapshot.activity));
+			if (["starting", "running", "waiting"].includes(this.status)) {
+				// A session restores messages, not an outstanding ask_supervisor RPC execution.
+				this.restoredQuestion = state.snapshot.question;
+				this.status = "idle";
+				this.taskEndedAt ??= this.updatedAt;
+				this.setPhase("interrupted; continue explicitly to recover");
+			}
+		}
+	}
+
+	persistedState(): PersistedSubagentRun {
+		return {
+			snapshot: this.snapshot(), task: structuredClone(this.task), parentCwd: this.parentCwd,
+			sessionId: this.sessionId, sessionDir: this.sessionDir,
+			accountedUsage: structuredClone(this.accountedUsage),
+		};
 	}
 
 	isLive(): boolean {
@@ -282,7 +321,7 @@ class SubagentRun {
 			startedAt: this.startedAt,
 			taskEndedAt: this.taskEndedAt,
 			updatedAt: this.updatedAt,
-			question: this.pendingQuestion?.question,
+			question: this.pendingQuestion?.question ?? this.restoredQuestion,
 			output: this.output,
 			error: this.error,
 			activity: this.activity.map((entry) => ({ ...entry })),
@@ -294,12 +333,14 @@ class SubagentRun {
 	consumeUsage(): UsageTotals {
 		const delta = usageDifference(this.totalUsage, this.accountedUsage);
 		this.accountedUsage = structuredClone(this.totalUsage);
+		this.onStateChange();
 		return delta;
 	}
 
 	async start(): Promise<SubagentSnapshot> {
 		const checkpoint = this.armCheckpoint();
 		try {
+			await mkdir(this.sessionDir, { recursive: true, mode: 0o700 });
 			await this.preparePrompt();
 			if (this.isStopped()) {
 				await this.cleanupPrompt();
@@ -334,7 +375,7 @@ class SubagentRun {
 	}
 
 	async continue(task: string, getAutoApproveMode: () => string, hooks: OperationHooks): Promise<SubagentSnapshot> {
-		if (this.status !== "idle" || !this.rpc) {
+		if (this.status !== "idle" || this.suspending) {
 			throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}`);
 		}
 		if (!task.trim()) throw new Error("Subagent task must not be blank");
@@ -348,15 +389,21 @@ class SubagentRun {
 		this.output = undefined;
 		this.error = undefined;
 		this.lastAssistant = undefined;
+		this.restoredQuestion = undefined;
 		this.activity.length = 0;
 		this.usage = emptyUsage();
 		this.setPhase("preparing follow-up task");
 		const checkpoint = this.armCheckpoint();
+		this.onStateChange();
 		this.emitUpdate();
 		try {
 			await verifyCanonicalDirectories([this.task.cwd], this.parentCwd);
 			if (!this.isRunning()) return checkpoint;
-			const commands = await this.rpc.send({ type: "get_commands" });
+			if (!this.rpc) await this.reopen();
+			if (!this.isRunning()) return checkpoint;
+			const rpc = this.rpc;
+			if (!rpc) throw new Error("Subagent process is not running");
+			const commands = await rpc.send({ type: "get_commands" });
 			if (!this.isRunning()) return checkpoint;
 			if (!commands.data?.commands?.some((command: { name: string }) => command.name === SUBAGENT_TASK_COMMAND)) {
 				throw new Error("Subagent task policy command is unavailable");
@@ -364,11 +411,11 @@ class SubagentRun {
 			const autoApproveMode = getAutoApproveMode();
 			this.expectedPolicyAck = taskPolicyAck(this.token, autoApproveMode);
 			this.policyAcknowledged = false;
-			const response = await this.rpc.send({
+			const response = await rpc.send({
 				type: "prompt",
 				message: `/${SUBAGENT_TASK_COMMAND} ${this.token} ${autoApproveMode}`,
 			});
-			await this.rpc.flushEvents();
+			await rpc.flushEvents();
 			if (!this.isRunning()) return checkpoint;
 			this.expectedPolicyAck = undefined;
 			if (response.data?.disposition !== "handled" || !this.policyAcknowledged) {
@@ -377,7 +424,7 @@ class SubagentRun {
 			this.setPhase("starting model");
 			this.emitUpdate();
 			this.preparingTask = false;
-			await this.rpc.send({ type: "prompt", message: `Task: ${task}` });
+			await rpc.send({ type: "prompt", message: `Task: ${task}` });
 		} catch (error) {
 			this.fail(error instanceof Error ? error.message : String(error));
 		}
@@ -404,6 +451,31 @@ class SubagentRun {
 		return checkpoint;
 	}
 
+	private async reopen(): Promise<void> {
+		const sessionFile = SessionManager.findById(this.task.cwd, this.sessionId, this.sessionDir);
+		if (!sessionFile) {
+			throw new Error(`Saved session for subagent ${this.id} is missing: ${this.sessionId}`);
+		}
+		await this.preparePrompt();
+		if (!this.isRunning()) {
+			await this.cleanupPrompt();
+			return;
+		}
+		this.rpc = new RpcProcess(
+			this.invocation, this.task.cwd, createChildEnvironment(this.id, this.token, this.task.cwd),
+			(event) => this.handleEvent(event), (error) => this.handleExit(error),
+		);
+		await this.rpc.start(this.buildArguments(sessionFile));
+		if (this.isStopped()) await this.rpc.stop();
+	}
+
+	async suspend(): Promise<void> {
+		this.suspending = true;
+		this.settleCheckpoint();
+		await this.rpc?.stop();
+		await this.cleanupPrompt();
+	}
+
 	async cancel(): Promise<SubagentSnapshot> {
 		if (!TERMINAL_STATUSES.has(this.status)) {
 			this.taskEndedAt ??= Date.now();
@@ -411,7 +483,9 @@ class SubagentRun {
 			this.error = "Cancelled by supervisor";
 			this.setPhase("cancelled");
 			this.pendingQuestion = undefined;
+			this.restoredQuestion = undefined;
 			this.settleCheckpoint();
+			this.onStateChange();
 		}
 		await this.rpc?.stop();
 		await this.cleanupPrompt();
@@ -439,15 +513,17 @@ class SubagentRun {
 	}
 
 	private isRunning(): boolean {
-		return this.status === "running";
+		return this.status === "running" && !this.suspending;
 	}
 
 	private isStopped(): boolean {
-		return TERMINAL_STATUSES.has(this.status);
+		return TERMINAL_STATUSES.has(this.status) || this.suspending;
 	}
 
-	private buildArguments(): string[] {
-		const args = ["--mode", "rpc", "--no-session"];
+	private buildArguments(sessionFile?: string): string[] {
+		const args = ["--mode", "rpc", "--session-dir", this.sessionDir];
+		if (sessionFile) args.push("--session", sessionFile);
+		else args.push("--session-id", this.sessionId);
 		if (this.task.model) args.push("--model", this.task.model);
 		if (this.task.thinkingLevel) args.push("--thinking", this.task.thinkingLevel);
 		if (this.task.tools) args.push("--tools", this.task.tools.join(","));
@@ -484,6 +560,7 @@ class SubagentRun {
 		if (!checkpoint) return;
 		this.checkpoint = undefined;
 		this.hooks = undefined;
+		this.onStateChange();
 		checkpoint.resolve(this.snapshot());
 	}
 
@@ -509,7 +586,7 @@ class SubagentRun {
 	}
 
 	private async handleEvent(event: Record<string, any>): Promise<void> {
-		if (TERMINAL_STATUSES.has(this.status)) return;
+		if (this.isStopped()) return;
 		if (this.status === "idle" || this.preparingTask) {
 			const dialog = event.type === "extension_ui_request" && isDialogRequest(event as RpcExtensionUIRequest);
 			if (dialog || ["agent_start", "agent_settled", "turn_start", "message_start", "message_end", "tool_execution_start"].includes(event.type)) {
@@ -632,18 +709,19 @@ class SubagentRun {
 	}
 
 	private handleExit(error: Error | undefined): void {
-		if (TERMINAL_STATUSES.has(this.status)) return;
+		if (this.isStopped()) return;
 		this.fail(error?.message ?? "Subagent process exited unexpectedly");
 	}
 
 	private fail(message: string): void {
-		if (TERMINAL_STATUSES.has(this.status)) return;
+		if (this.isStopped()) return;
 		this.taskEndedAt ??= Date.now();
 		this.setStatus("failed");
 		this.error = message;
 		this.setPhase("failed");
 		this.pushActivity(message);
 		this.settleCheckpoint();
+		this.onStateChange();
 		const stop = this.rpc?.stop() ?? Promise.resolve();
 		void stop.finally(() => this.cleanupPrompt());
 	}
@@ -653,6 +731,7 @@ export interface SubagentManagerOptions {
 	invocation?: PiInvocation;
 	onLiveCountChange?: (count: number) => void;
 	onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
+	onStateChange?: (runs: PersistedSubagentRun[]) => void;
 }
 
 export class SubagentManager {
@@ -663,11 +742,33 @@ export class SubagentManager {
 	private readonly onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
 	private readonly shutdownController = new AbortController();
 	private dialogQueue = Promise.resolve();
+	private readonly onStateChange?: (runs: PersistedSubagentRun[]) => void;
 
 	constructor(options: SubagentManagerOptions = {}) {
 		this.invocation = options.invocation ?? resolvePiInvocation();
 		this.onLiveCountChange = options.onLiveCountChange;
 		this.onAutoApproveStat = options.onAutoApproveStat;
+		this.onStateChange = options.onStateChange;
+	}
+
+	restore(states: PersistedSubagentRun[]): void {
+		for (const state of states) {
+			const run = new SubagentRun(
+				state.snapshot.id, state.task, state.parentCwd, this.invocation,
+				(current, request) => this.enqueueUserUi(current, request),
+				() => this.publishLiveCount(), () => this.publishState(), state,
+			);
+			this.runs.set(run.id, run);
+		}
+		this.publishLiveCount();
+	}
+
+	persistedState(): PersistedSubagentRun[] {
+		return [...this.runs.values()].map((run) => run.persistedState());
+	}
+
+	private publishState(): void {
+		this.onStateChange?.(this.persistedState());
 	}
 
 	async start(
@@ -693,12 +794,13 @@ export class SubagentManager {
 			const run = new SubagentRun(
 				this.createRunId(), task, canonicalParentCwd, this.invocation,
 				(current, request) => this.enqueueUserUi(current, request),
-				() => this.publishLiveCount(),
+				() => this.publishLiveCount(), () => this.publishState(),
 			);
 			this.runs.set(run.id, run);
 			return run;
 		});
 		this.publishLiveCount();
+		this.publishState();
 		const update = () => onUpdate?.(runs.map((run) => run.snapshot()));
 		for (const run of runs) run.setHooks({ ctx, onUpdate: update });
 		update();
@@ -788,7 +890,7 @@ export class SubagentManager {
 
 	async shutdown(): Promise<void> {
 		this.shutdownController.abort();
-		await Promise.all([...this.runs.values()].map((run) => run.cancel()));
+		await Promise.all([...this.runs.values()].map((run) => run.suspend()));
 		this.runs.clear();
 	}
 

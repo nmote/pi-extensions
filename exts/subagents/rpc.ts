@@ -164,14 +164,13 @@ export class RpcProcess {
 
 	async stop(): Promise<void> {
 		const child = this.process;
-		if (!child || child.exitCode !== null || child.signalCode !== null) return;
+		if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
 		if (this.stopPromise) return this.stopPromise;
 		this.stopping = true;
 		child.kill("SIGTERM");
 		this.stopPromise = new Promise<void>((resolve) => {
 			const timer = setTimeout(() => {
 				if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-				resolve();
 			}, 1_000);
 			child.once("exit", () => {
 				clearTimeout(timer);

@@ -77,17 +77,22 @@ Configuration and state are independent of the package checkout.
 ### Reusable subagents
 
 Successful subagents remain idle within the parent session. Use
-`subagent_continue` with their ID and a related task to retain the same process
-and conversation context (subject to normal Pi compaction). Agent instructions,
-model, thinking level, cwd, and tools stay fixed. Each follow-up inherits the
-parent's current approval mode; remembered exact-call approvals persist, but
-one-shot approvals expire between tasks. Cwd approval covers the child's lifetime.
+`subagent_continue` with their ID and a related task to retain conversation
+context (subject to normal Pi compaction). Agent instructions, model, thinking
+level, cwd, and tools stay fixed. Each follow-up inherits the parent's current
+approval mode; remembered exact-call approvals persist, but one-shot approvals
+expire between tasks. Cwd approval covers the agent's lifetime.
 
 `subagent_reply` answers waiting questions. `subagent_cancel` ends a child,
 including an idle one; omit its ID to end all live children. Ended or failed
-children cannot be reused. Parent shutdown releases all children. Status shows
-the latest task, its usage, and lifetime usage totals; no cross-session reuse.
-The footer shows `subagents: N live`, including idle and active children, and
+children cannot be reused. Parent shutdown stops child processes but preserves
+idle agents through session resume and `/reload`; continuation lazily reopens
+their saved Pi sessions under the same IDs. Child sessions are stored under
+`<agent-dir>/subagents/`. Interrupted tasks, including pending supervisor
+questions, require explicit continuation rather than `subagent_reply`.
+Agents created before session persistence cannot be restored.
+Status shows the latest task, its usage, and lifetime usage totals.
+The footer shows `subagents: N live`, including retained idle and active agents, and
 omits the item when none remain.
 
 ### Approval policy
