@@ -147,6 +147,24 @@ check(
 		/parent cycle/.test(errorOf(() => backlogGraph(snapshot([item("aa0001", { parent: "aa0001" })]), "aa0001"))),
 );
 
+const longTitle = 'Review workflow approval permissions and safely escape "quoted" \\N <labels>';
+const longRepo = `~/repos/${"x".repeat(60)}`;
+const labels = backlogGraph(snapshot([
+	item("aa0001", { title: longTitle, repos: ["~/repos/first-long-repository-name", "~/repos/second-long-repository-name", longRepo] }),
+	item("bb0002", { title: longTitle, parent: "aa0001" }),
+	item("cc0003", { title: longTitle, parent: "bb0002" }),
+]), "cc0003");
+check(
+	"wraps leaf and nested parent titles at word boundaries with safe DOT escaping",
+	(labels.dot.match(/Review workflow approval permissions and safely\\n/g) ?? []).length === 3 &&
+		(labels.dot.match(/escape \\"quoted\\" \\\\N <labels>/g) ?? []).length === 3,
+);
+check(
+	"wraps repository lists without splitting long paths or losing metadata",
+	labels.dot.includes(`Repos: ~/repos/first-long-repository-name,\\n~/repos/second-long-repository-name,\\n${longRepo}`) &&
+		labels.dot.includes('margin="0.25,0.12"'),
+);
+
 const dir = mkdtempSync(join(tmpdir(), "backlog-graph-test-"));
 try {
 	const store = new BacklogStore(dir);

@@ -21,6 +21,22 @@ function quote(value: string): string {
 	return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "").replace(/\n/g, "\\n").replace(/[\x00-\x1f\x7f]/g, " ")}"`;
 }
 
+/** Wrap at whitespace without splitting repository paths or Graphviz escape sequences. */
+function wrapLabel(value: string): string {
+	return value.split("\n").flatMap((line) => {
+		const wrapped: string[] = [];
+		let start = 0;
+		for (const word of line.matchAll(/\S+/g)) {
+			if (word.index > start && word.index + word[0].length - start > 48) {
+				wrapped.push(line.slice(start, word.index).trimEnd());
+				start = word.index;
+			}
+		}
+		wrapped.push(line.slice(start));
+		return wrapped;
+	}).join("\n");
+}
+
 export interface BacklogGraph {
 	dot: string;
 	count: number;
@@ -87,11 +103,11 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 	const lines = [
 		"digraph backlog {",
 		"  graph [rankdir=LR, ranksep=1, compound=true, fontname=Helvetica, labelloc=b, label=\"Boxes: parent contains children    Dashed: prerequisite to dependent\"];",
-		"  node [shape=box, style=filled, fontname=Helvetica];",
+		"  node [shape=box, style=\"rounded,filled\", fontname=Helvetica, margin=\"0.25,0.12\", color=\"#888888\"];",
 	];
 	const emit = (id: string, indent: string): void => {
 		const item = snapshot.items.get(id)?.item;
-		const label = item ? `${id}\n${item.title}\n[${item.status}]\nRepos: ${item.repos.join(", ")}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
+		const label = item ? `${id}\n${wrapLabel(item.title)}\n[${item.status}]\n${wrapLabel(`Repos: ${item.repos.join(", ")}`)}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
 		const fill = item ? STATUS_COLORS[item.status] : "#ffcccc";
 		if (children.has(id)) {
 			lines.push(`${indent}subgraph ${quote(`cluster_${id}`)} {`);
