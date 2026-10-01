@@ -34,6 +34,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { EVALUATOR_CACHE_ENTRY, EvaluatorCache } from "./cache.ts";
+import { ApprovalQueue } from "./approval-queue.ts";
 import { type AutoApproveConfig, EFFORTS, isEffort, isMode, loadConfig, type Mode, MODES, saveEvaluatorEffort } from "./config.ts";
 import {
 	absoluteToolPath,
@@ -121,7 +122,14 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	// Evaluator outputs and counters persist as custom session entries.
 	const evaluatorCache = new EvaluatorCache();
 	const pendingApprovals = new Map<string, PendingApproval>();
+	const approvalQueue = new ApprovalQueue();
 	let stats = emptyStats();
+
+	function resetApprovals(): void {
+		approvalQueue.reset();
+		oneShotAllow.clear();
+		pendingApprovals.clear();
+	}
 
 	pi.events.on(AUTO_APPROVE_STATE_CHANNEL, (data) => {
 		const request = data as { respond?: (state: { mode: Mode }) => void } | undefined;
@@ -132,8 +140,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		const request = data as { token?: string; mode?: unknown; ctx: ExtensionContext; respond: () => void };
 		const token = process.env[SUBAGENT_TOKEN_ENV];
 		if (!token || request?.token !== token || !isMode(request.mode)) return;
-		oneShotAllow.clear();
-		pendingApprovals.clear();
+		resetApprovals();
 		setMode(request.mode, request.ctx, false);
 		request.respond();
 	});
@@ -312,10 +319,15 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		const choices = key
 			? ["Approve once", "Approve (always this exact call this session)", "Deny"]
 			: ["Approve once", "Deny"];
-		const choice = await ctx.ui.select(
-			tagApprovalTitle(`Approve tool call?\n\n${preview(toolName, input, ctx.cwd)}\n\n(${reason})`),
-			choices,
+		const decision = await approvalQueue.select(
+			(signal) => ctx.ui.select(
+				tagApprovalTitle(`Approve tool call?\n\n${preview(toolName, input, ctx.cwd)}\n\n(${reason})`),
+				choices,
+				{ signal },
+			),
+			ctx.signal,
 		);
+		const choice = decision.signal.aborted ? undefined : decision.choice;
 		if (choice === "Approve (always this exact call this session)" && key) {
 			alwaysAllow.add(key);
 			pi.appendEntry(MEMO_ENTRY, { key });
@@ -345,7 +357,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			requestId: Type.String({ description: "Request ID from the automatic rejection" }),
 			justification: Type.String({ description: "Why the exact rejected call is necessary and safer alternatives will not work" }),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const pending = pendingApprovals.get(params.requestId);
 			if (!pending || pending.expiresAt <= Date.now()) {
 				pendingApprovals.delete(params.requestId);
@@ -367,12 +379,17 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			const justification = params.justification.length > 2000
 				? `${params.justification.slice(0, 2000)}…`
 				: params.justification;
-			const choice = await ctx.ui.select(
-				tagApprovalTitle(
-					`Approve escalated tool call?\n\n${preview(pending.toolName, pending.input, pending.cwd)}\n\nAgent justification:\n${justification}\n\n(Evaluator: ${pending.reason})`,
+			const decision = await approvalQueue.select(
+				(dialogSignal) => ctx.ui.select(
+					tagApprovalTitle(
+						`Approve escalated tool call?\n\n${preview(pending.toolName, pending.input, pending.cwd)}\n\nAgent justification:\n${justification}\n\n(Evaluator: ${pending.reason})`,
+					),
+					["Approve once", "Approve (always this exact call this session)", "Deny"],
+					{ signal: dialogSignal },
 				),
-				["Approve once", "Approve (always this exact call this session)", "Deny"],
+				signal ?? ctx.signal,
 			);
+			const choice = decision.signal.aborted ? undefined : decision.choice;
 
 			if (choice === "Approve once") {
 				oneShotAllow.set(pending.key, (oneShotAllow.get(pending.key) ?? 0) + 1);
@@ -624,7 +641,10 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.on("session_shutdown", () => resetApprovals());
+
 	pi.on("session_start", async (_event, ctx) => {
+		resetApprovals();
 		config = loadConfig({ seed: true });
 
 		// Restore persisted session state, then apply the CLI flag override if present.
@@ -636,8 +656,6 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		mode = config.defaultMode;
 		alwaysAllow.clear();
 		humanDenied.clear();
-		oneShotAllow.clear();
-		pendingApprovals.clear();
 		evaluatorCache.clear();
 		stats = emptyStats();
 		for (const e of entries) {

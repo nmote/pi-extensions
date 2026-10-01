@@ -25,6 +25,55 @@ function check(name: string, condition: boolean): void {
 	}
 }
 
+async function bounded<T>(work: Promise<T>): Promise<T> {
+	let timer: ReturnType<typeof setTimeout>;
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => reject(new Error("Concurrent approval test timed out")), 3000);
+	});
+	try {
+		return await Promise.race([work, timeout]);
+	} finally {
+		clearTimeout(timer!);
+	}
+}
+
+function deferredDialogs() {
+	let active = 0;
+	let maxActive = 0;
+	const opened: Array<{
+		title: string;
+		signal?: AbortSignal;
+		answer(choice?: string): void;
+		fail(): void;
+	}> = [];
+	return {
+		opened,
+		get maxActive() { return maxActive; },
+		select(title: string, _choices: string[], options?: { signal?: AbortSignal }): Promise<string | undefined> {
+			return new Promise((resolve, reject) => {
+				active++;
+				maxActive = Math.max(maxActive, active);
+				let closed = false;
+				const close = () => {
+					if (!closed) active--;
+					closed = true;
+					options?.signal?.removeEventListener("abort", close);
+				};
+				options?.signal?.addEventListener("abort", close, { once: true });
+				opened.push({
+					title,
+					signal: options?.signal,
+					// Responses can arrive after cancellation, as with RPC clients.
+					answer(choice) { close(); resolve(choice); },
+					fail() { close(); reject(new Error("Dialog failed")); },
+				});
+			});
+		},
+	};
+}
+
+const flushDialogs = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 async function main(): Promise<void> {
 	const temp = mkdtempSync(join(tmpdir(), "pi-auto-approve-index-test-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -59,6 +108,7 @@ async function main(): Promise<void> {
 		const notices: string[] = [];
 		const statuses: Array<{ key: string; value: string | undefined }> = [];
 		let selection: string | undefined = "Approve once";
+		let select: (title: string, choices: string[], options?: { signal?: AbortSignal }) => Promise<string | undefined> = async () => selection;
 		const pi = {
 			events: {
 				on(name: string, handler: (data: any) => void) {
@@ -163,7 +213,7 @@ async function main(): Promise<void> {
 				setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); },
 				setWidget() {},
 				notify(message: string) { notices.push(message); },
-				select: async () => selection,
+				select: (title: string, choices: string[], options?: { signal?: AbortSignal }) => select(title, choices, options),
 			},
 		};
 		await handlers.get("session_start")?.[0]?.({}, ctx);
@@ -231,8 +281,8 @@ async function main(): Promise<void> {
 		const parallelIdB = /requestId "([^"]+)"/.exec(parallelB?.reason ?? "")?.[1];
 		await approvalTool.execute("approval-2", { requestId: parallelIdA, justification: "First call" }, undefined, undefined, ctx);
 		await approvalTool.execute("approval-3", { requestId: parallelIdB, justification: "Second call" }, undefined, undefined, ctx);
-		check("parallel exact approvals grant two retries", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
-		check("parallel approval count is not collapsed", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
+		check("two exact approvals grant two retries", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
+		check("exact approval count is not collapsed", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
 
 		const cancellable = await gate({ toolName: "bash", input: { command } }, ctx);
 		const cancellableId = /requestId "([^"]+)"/.exec(cancellable?.reason ?? "")?.[1];
@@ -473,6 +523,102 @@ async function main(): Promise<void> {
 		check("one-shot allowance expires at task boundary", (await gate(oneShotCall, ctx))?.block === true);
 		const expired = await approvalTool.execute("old-task", { requestId: pendingId, justification: "needed" }, undefined, undefined, ctx);
 		check("old task approval requests expire", expired.content[0].text.includes("invalid or expired"));
+
+		await bounded((async () => {
+			const call = (command: string) => ({ toolName: "bash", input: { command } });
+			const request = async (command: string) => {
+				const rejection = await gate(call(command), ctx);
+				const requestId = /requestId "([^"]+)"/.exec(rejection?.reason ?? "")?.[1];
+				if (!requestId) throw new Error(`No approval request for ${command}`);
+				return { requestId, justification: command };
+			};
+			const escalate = (params: { requestId: string; justification: string }, signal?: AbortSignal) =>
+				approvalTool.execute(params.justification, params, signal, undefined, ctx);
+			const humans = () => entries.filter((entry) => entry.customType === "auto-approve-memo" || entry.customType === "auto-approve-human-deny" ||
+				(entry.customType === "auto-approve-stats" && (entry.data as any).humanApprovals > 0));
+
+			let dialogs = deferredDialogs();
+			select = dialogs.select;
+			const requests = await Promise.all(["fifo-once", "fifo-deny", "fifo-always"].map(request));
+			const results = requests.map((params) => escalate(params));
+			await flushDialogs();
+			check("concurrent escalations open only the first dialog", dialogs.opened.length === 1 && dialogs.opened[0].title.includes("fifo-once"));
+			dialogs.opened[0].answer("Approve once");
+			await flushDialogs();
+			check("second approval follows the first", dialogs.opened.length === 2 && dialogs.opened[1].title.includes("fifo-deny"));
+			dialogs.opened[1].answer("Deny");
+			await flushDialogs();
+			check("third approval follows denial", dialogs.opened.length === 3 && dialogs.opened[2].title.includes("fifo-always"));
+			dialogs.opened[2].answer("Approve (always this exact call this session)");
+			const completed = await Promise.all(results);
+			check("concurrent approvals settle with their own decisions", completed[0].content[0].text.startsWith("Approved once") &&
+				completed[1].content[0].text.startsWith("Denied") && completed[2].content[0].text.startsWith("Approved for") && dialogs.maxActive === 1);
+			check("concurrent decisions authorize only their exact calls", (await gate(call("fifo-once"), ctx)) === undefined &&
+				(await gate(call("fifo-once"), ctx))?.block && (await gate(call("fifo-deny"), ctx))?.reason.includes("user denied") &&
+				(await gate(call("fifo-always"), ctx)) === undefined && (await gate(call("fifo-always"), ctx)) === undefined);
+
+			const queuedRequest = await request("queued-cancel");
+			const survivorRequest = await request("cancel-survivor");
+			await commands.get("auto").handler("manual", ctx);
+			dialogs = deferredDialogs();
+			select = dialogs.select;
+			const activeAbort = new AbortController();
+			const active = gate(call("active-cancel"), { ...ctx, signal: activeAbort.signal });
+			const queuedAbort = new AbortController();
+			const queued = escalate(queuedRequest, queuedAbort.signal);
+			const survivor = escalate(survivorRequest);
+			await flushDialogs();
+			queuedAbort.abort();
+			check("queued cancellation settles before the active dialog", (await queued).content[0].text.includes("cancelled") && dialogs.opened.length === 1);
+			activeAbort.abort();
+			check("active manual approval cancels through its operation signal", (await active)?.reason.includes("cancelled") && dialogs.opened[0].signal?.aborted === true);
+			await flushDialogs();
+			check("manual and escalated approvals share one queue", dialogs.opened.length === 2 && dialogs.opened[1].title.includes("cancel-survivor") && dialogs.maxActive === 1);
+			const beforeLateResponse = humans().length;
+			dialogs.opened[0].answer("Approve (always this exact call this session)");
+			await flushDialogs();
+			check("late cancelled responses do not grant approval", humans().length === beforeLateResponse);
+			dialogs.opened[1].answer("Approve once");
+			await survivor;
+
+			dialogs = deferredDialogs();
+			select = dialogs.select;
+			const failed = gate(call("dialog-failure"), ctx).catch((error: Error) => error.message);
+			const afterFailure = gate(call("after-dialog-failure"), ctx);
+			await flushDialogs();
+			dialogs.opened[0].fail();
+			check("dialog errors propagate", (await failed) === "Dialog failed");
+			await flushDialogs();
+			dialogs.opened[1].answer("Approve once");
+			check("dialog failure does not block later approvals", (await afterFailure) === undefined && dialogs.maxActive === 1);
+			const preAborted = new AbortController();
+			preAborted.abort();
+			check("already-aborted manual requests never open", (await gate(call("pre-aborted"), { ...ctx, signal: preAborted.signal }))?.block && dialogs.opened.length === 2);
+			check("headless manual approval remains blocked", (await gate(call("headless-manual"), headless))?.block && dialogs.opened.length === 2);
+
+			for (const boundary of ["session_shutdown", "session_start", "managed_task"]) {
+				await commands.get("auto").handler("auto", ctx);
+				dialogs = deferredDialogs();
+				select = dialogs.select;
+				const first = await request(`${boundary}-active`);
+				const second = await request(`${boundary}-queued`);
+				const pending = [escalate(first), escalate(second)];
+				await flushDialogs();
+				const beforeReset = humans().length;
+				// Resolve the UI before invalidation to exercise the continuation race.
+				dialogs.opened[0].answer("Approve (always this exact call this session)");
+				if (boundary === "managed_task") beginTask("auto");
+				else await handlers.get(boundary)?.[0]?.({}, ctx);
+				const cancelled = await Promise.all(pending);
+				check(`${boundary} cancels active and queued approvals without stale grants`,
+					cancelled.every((result) => result.content[0].text.includes("cancelled")) && dialogs.opened.length === 1 &&
+					dialogs.opened[0].signal?.aborted === true && humans().length === beforeReset);
+				const fresh = escalate(await request(`${boundary}-fresh`));
+				await flushDialogs();
+				dialogs.opened[1].answer("Approve once");
+				check(`${boundary} permits fresh approvals`, (await fresh).content[0].text.startsWith("Approved once"));
+			}
+		})());
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
