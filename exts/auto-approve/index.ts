@@ -200,7 +200,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	): Promise<{ choice: string | undefined; signal: AbortSignal }> {
 		return approvalQueue.select(async (dialogSignal) => {
 			const dialogCtx = { ...ctx, signal: dialogSignal };
-			const options = [...choices.filter((choice) => choice !== EDIT_GUIDANCE_CHOICE), EDIT_GUIDANCE_CHOICE];
+			const options = choices.includes(EDIT_GUIDANCE_CHOICE) ? choices : [...choices, EDIT_GUIDANCE_CHOICE];
 			const choice = await ctx.ui.select(tagApprovalTitle(title), options, { signal: dialogSignal });
 			try {
 				const edit = choice === EDIT_GUIDANCE_CHOICE
@@ -472,7 +472,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			const decision = await selectApproval(
 				ctx,
 				`Approve escalated tool call?\n\n${preview(pending.toolName, pending.input, pending.cwd)}\n\nAgent justification:\n${justification}\n\n(Evaluator: ${pending.reason})`,
-				["Approve once", "Approve (always this exact call this session)", "Deny"], signal,
+				["Approve once", EDIT_GUIDANCE_CHOICE, "Deny"], signal,
 			);
 			const choice = decision.signal.aborted ? undefined : decision.choice;
 
@@ -484,16 +484,6 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					details: {},
 				};
 			}
-			if (choice === "Approve (always this exact call this session)") {
-				alwaysAllow.add(pending.key);
-				pi.appendEntry(MEMO_ENTRY, { key: pending.key });
-				record("humanApprovals", ctx);
-				return {
-					content: [{ type: "text", text: "Approved for this exact call for the rest of the session. Retry the original tool call." }],
-					details: {},
-				};
-			}
-
 			if (choice === "Deny") {
 				humanDenied.add(pending.key);
 				pi.appendEntry(HUMAN_DENY_ENTRY, { key: pending.key });

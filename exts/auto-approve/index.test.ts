@@ -42,6 +42,7 @@ function deferredDialogs() {
 	let maxActive = 0;
 	const opened: Array<{
 		title: string;
+		choices: string[];
 		signal?: AbortSignal;
 		answer(choice?: string): void;
 		fail(): void;
@@ -49,7 +50,7 @@ function deferredDialogs() {
 	return {
 		opened,
 		get maxActive() { return maxActive; },
-		select(title: string, _choices: string[], options?: { signal?: AbortSignal }): Promise<string | undefined> {
+		select(title: string, choices: string[], options?: { signal?: AbortSignal }): Promise<string | undefined> {
 			return new Promise((resolve, reject) => {
 				active++;
 				maxActive = Math.max(maxActive, active);
@@ -62,6 +63,7 @@ function deferredDialogs() {
 				options?.signal?.addEventListener("abort", close, { once: true });
 				opened.push({
 					title,
+					choices,
 					signal: options?.signal,
 					// Responses can arrive after cancellation, as with RPC clients.
 					answer(choice) { close(); resolve(choice); },
@@ -539,23 +541,25 @@ async function main(): Promise<void> {
 
 			let dialogs = deferredDialogs();
 			select = dialogs.select;
-			const requests = await Promise.all(["fifo-once", "fifo-deny", "fifo-always"].map(request));
+			const requests = await Promise.all(["fifo-once", "fifo-deny", "fifo-third"].map(request));
 			const results = requests.map((params) => escalate(params));
 			await flushDialogs();
 			check("concurrent escalations open only the first dialog", dialogs.opened.length === 1 && dialogs.opened[0].title.includes("fifo-once"));
+			check("escalations offer only one-shot approval, guidance editing, and denial in order",
+				JSON.stringify(dialogs.opened[0].choices) === JSON.stringify(["Approve once", "Approve once + edit session guidance…", "Deny"]));
 			dialogs.opened[0].answer("Approve once");
 			await flushDialogs();
 			check("second approval follows the first", dialogs.opened.length === 2 && dialogs.opened[1].title.includes("fifo-deny"));
 			dialogs.opened[1].answer("Deny");
 			await flushDialogs();
-			check("third approval follows denial", dialogs.opened.length === 3 && dialogs.opened[2].title.includes("fifo-always"));
-			dialogs.opened[2].answer("Approve (always this exact call this session)");
+			check("third approval follows denial", dialogs.opened.length === 3 && dialogs.opened[2].title.includes("fifo-third"));
+			dialogs.opened[2].answer("Approve once");
 			const completed = await Promise.all(results);
 			check("concurrent approvals settle with their own decisions", completed[0].content[0].text.startsWith("Approved once") &&
-				completed[1].content[0].text.startsWith("Denied") && completed[2].content[0].text.startsWith("Approved for") && dialogs.maxActive === 1);
+				completed[1].content[0].text.startsWith("Denied") && completed[2].content[0].text.startsWith("Approved once") && dialogs.maxActive === 1);
 			check("concurrent decisions authorize only their exact calls", (await gate(call("fifo-once"), ctx)) === undefined &&
 				(await gate(call("fifo-once"), ctx))?.block && (await gate(call("fifo-deny"), ctx))?.reason.includes("user denied") &&
-				(await gate(call("fifo-always"), ctx)) === undefined && (await gate(call("fifo-always"), ctx)) === undefined);
+				(await gate(call("fifo-third"), ctx)) === undefined && (await gate(call("fifo-third"), ctx))?.block);
 
 			const queuedRequest = await request("queued-cancel");
 			const survivorRequest = await request("cancel-survivor");
@@ -574,6 +578,10 @@ async function main(): Promise<void> {
 			check("active manual approval cancels through its operation signal", (await active)?.reason.includes("cancelled") && dialogs.opened[0].signal?.aborted === true);
 			await flushDialogs();
 			check("manual and escalated approvals share one queue", dialogs.opened.length === 2 && dialogs.opened[1].title.includes("cancel-survivor") && dialogs.maxActive === 1);
+			check("manual approvals retain their session-wide option and guidance placement",
+				JSON.stringify(dialogs.opened[0].choices) === JSON.stringify([
+					"Approve once", "Approve (always this exact call this session)", "Deny", "Approve once + edit session guidance…",
+				]));
 			const beforeLateResponse = humans().length;
 			dialogs.opened[0].answer("Approve (always this exact call this session)");
 			await flushDialogs();
@@ -606,7 +614,7 @@ async function main(): Promise<void> {
 				await flushDialogs();
 				const beforeReset = humans().length;
 				// Resolve the UI before invalidation to exercise the continuation race.
-				dialogs.opened[0].answer("Approve (always this exact call this session)");
+				dialogs.opened[0].answer("Approve once");
 				if (boundary === "managed_task") beginTask("auto");
 				else await handlers.get(boundary)?.[0]?.({}, ctx);
 				const cancelled = await Promise.all(pending);

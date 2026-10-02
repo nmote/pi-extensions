@@ -127,6 +127,12 @@ try {
 	const unrelated = harness();
 	await unrelated.start();
 	check("unrelated sessions have no guidance", (await unrelated.policy()).text === "");
+	unrelated.controls.evaluate = async () => verdict("review");
+	await unrelated.escalate("guidance-once");
+	check("guidance approval grants one retry without a session-wide memo",
+		(await unrelated.policy()).revision === 1 && (await unrelated.gate("guidance-once")) === undefined &&
+		(await unrelated.gate("guidance-once"))?.block === true &&
+		!unrelated.entries.some((entry) => entry.customType === "auto-approve-memo"));
 
 	const child = harness([], root, "child");
 	const sibling = harness([], root, "sibling");
