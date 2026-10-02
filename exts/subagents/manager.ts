@@ -14,6 +14,9 @@ import {
 	SUBAGENT_RUN_ID_ENV,
 	SUBAGENT_TOKEN_ENV,
 } from "../shared/subagent-protocol.ts";
+import {
+	type ApprovalGuidance, type GuidanceRequest, isGuidanceTitle, parseGuidanceRequest,
+} from "../shared/approval-guidance.ts";
 import type { ResolvedSubagentTask } from "./agents.ts";
 import { type PiInvocation, resolvePiInvocation, RpcProcess } from "./rpc.ts";
 import type { PersistedSubagentRun } from "./state.ts";
@@ -223,6 +226,7 @@ class SubagentRun {
 	readonly token = randomUUID();
 	private rpc?: RpcProcess;
 	private suspending = false;
+	private readonly uiLifetime = new AbortController();
 	private restoredQuestion?: SupervisorQuestion;
 	private readonly sessionId: string = randomUUID();
 	private readonly sessionDir = join(getAgentDir(), "subagents", this.sessionId);
@@ -357,6 +361,7 @@ class SubagentRun {
 				createChildEnvironment(this.id, this.token, this.task.cwd),
 				(event) => this.handleEvent(event),
 				(error) => this.handleExit(error),
+				(event) => this.isGuidanceEvent(event),
 			);
 			await this.rpc.start(this.buildArguments());
 			if (this.isStopped()) {
@@ -464,6 +469,7 @@ class SubagentRun {
 		this.rpc = new RpcProcess(
 			this.invocation, this.task.cwd, createChildEnvironment(this.id, this.token, this.task.cwd),
 			(event) => this.handleEvent(event), (error) => this.handleExit(error),
+			(event) => this.isGuidanceEvent(event),
 		);
 		await this.rpc.start(this.buildArguments(sessionFile));
 		if (this.isStopped()) await this.rpc.stop();
@@ -471,6 +477,7 @@ class SubagentRun {
 
 	async suspend(): Promise<void> {
 		this.suspending = true;
+		this.uiLifetime.abort();
 		this.settleCheckpoint();
 		await this.rpc?.stop();
 		await this.cleanupPrompt();
@@ -503,12 +510,16 @@ class SubagentRun {
 	}
 
 	currentContext(): ExtensionContext | undefined {
-		return this.hooks?.ctx;
+		const ctx = this.hooks?.ctx;
+		return ctx ? { ...ctx, signal: AbortSignal.any([
+			this.uiLifetime.signal, ...(ctx.signal ? [ctx.signal] : []),
+		]) } : undefined;
 	}
 
 	private setStatus(status: SubagentStatus): void {
 		if (this.status === status) return;
 		this.status = status;
+		if (TERMINAL_STATUSES.has(status)) this.uiLifetime.abort();
 		this.onStatusChange();
 	}
 
@@ -585,6 +596,10 @@ class SubagentRun {
 		this.hooks?.onUpdate?.();
 	}
 
+	private isGuidanceEvent(event: Record<string, any>): boolean {
+		return event.type === "extension_ui_request" && event.method === "input" && isGuidanceTitle(event.title, this.token);
+	}
+
 	private async handleEvent(event: Record<string, any>): Promise<void> {
 		if (this.isStopped()) return;
 		if (this.status === "idle" || this.preparingTask) {
@@ -607,6 +622,11 @@ class SubagentRun {
 				this.setPhase("waiting for supervisor");
 				this.emitUpdate();
 				this.settleCheckpoint();
+				return;
+			}
+
+			if (request.method === "input" && isGuidanceTitle(request.title, this.token)) {
+				await this.routeUi(this, request);
 				return;
 			}
 
@@ -731,6 +751,8 @@ export interface SubagentManagerOptions {
 	invocation?: PiInvocation;
 	onLiveCountChange?: (count: number) => void;
 	onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
+	onGuidanceRequest?: (request: GuidanceRequest, ctx: ExtensionContext) => Promise<ApprovalGuidance>;
+	onApprovalRequest?: (ctx: ExtensionContext, title: string, choices: string[]) => Promise<string | undefined>;
 	onStateChange?: (runs: PersistedSubagentRun[]) => void;
 }
 
@@ -740,6 +762,8 @@ export class SubagentManager {
 	private readonly onLiveCountChange?: (count: number) => void;
 	private lastLiveCount = 0;
 	private readonly onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
+	private readonly onGuidanceRequest?: SubagentManagerOptions["onGuidanceRequest"];
+	private readonly onApprovalRequest?: SubagentManagerOptions["onApprovalRequest"];
 	private readonly shutdownController = new AbortController();
 	private dialogQueue = Promise.resolve();
 	private readonly onStateChange?: (runs: PersistedSubagentRun[]) => void;
@@ -748,6 +772,8 @@ export class SubagentManager {
 		this.invocation = options.invocation ?? resolvePiInvocation();
 		this.onLiveCountChange = options.onLiveCountChange;
 		this.onAutoApproveStat = options.onAutoApproveStat;
+		this.onGuidanceRequest = options.onGuidanceRequest;
+		this.onApprovalRequest = options.onApprovalRequest;
 		this.onStateChange = options.onStateChange;
 	}
 
@@ -970,6 +996,18 @@ export class SubagentManager {
 	}
 
 	private async enqueueUserUi(run: SubagentRun, request: RpcExtensionUIRequest): Promise<void> {
+		if (request.method === "input" && isGuidanceTitle(request.title, run.token)) {
+			const policyRequest = parseGuidanceRequest(request.placeholder);
+			const ctx = run.currentContext();
+			try {
+				if (!policyRequest || !ctx || ctx.signal?.aborted || !this.onGuidanceRequest) throw new Error("Session guidance is unavailable");
+				const policy = await this.onGuidanceRequest(policyRequest, ctx);
+				run.sendUiResponse({ type: "extension_ui_response", id: request.id, value: JSON.stringify(policy) });
+			} catch {
+				run.sendUiResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+			}
+			return;
+		}
 		if (!isDialogRequest(request)) return this.routeUserUi(run, request);
 		await this.enqueueDialog(() => this.routeUserUi(run, request));
 	}
@@ -1007,7 +1045,9 @@ export class SubagentManager {
 		};
 
 		if (request.method === "select") {
-			const value = await ctx.ui.select(title, request.options, uiOptions);
+			const value = approvalTitle !== undefined && this.onApprovalRequest
+				? await this.onApprovalRequest(ctx, title, request.options)
+				: await ctx.ui.select(title, request.options, uiOptions);
 			run.sendUiResponse(
 				value === undefined
 					? { type: "extension_ui_response", id: request.id, cancelled: true }

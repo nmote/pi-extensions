@@ -12,7 +12,8 @@
  *
  * Precedence (all modes): deny list > global skill read / in-scope file access
  * > allow list > mode. Matching context rules only supplement model evaluation;
- * they never override allow or deny decisions.
+ * they never override allow or deny decisions. Session guidance supersedes
+ * conflicting evaluator policy within its scope and is shared with subagents.
  * The deny list always wins, including in yolo.
  *
  * Fail-closed: in non-interactive contexts (no UI), anything that would prompt
@@ -62,6 +63,11 @@ import {
 	tagAutoApproveStat,
 } from "../shared/subagent-protocol.ts";
 import { ensureSmallModel, loadSmallModel } from "../shared/small-model.ts";
+import {
+	APPROVAL_DIALOG_CHANNEL, APPROVAL_GUIDANCE_CHANNEL, type ApprovalDialogRequest,
+	type ApprovalGuidance, type GuidanceRequest,
+	guidanceTitle, isApprovalGuidance, parseGuidanceRequest,
+} from "../shared/approval-guidance.ts";
 
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const APPROVAL_TOOL = "request_tool_approval";
@@ -71,6 +77,8 @@ const MEMO_ENTRY = "auto-approve-memo";
 const HUMAN_DENY_ENTRY = "auto-approve-human-deny";
 const MODE_ENTRY = "auto-approve-mode";
 const STATS_ENTRY = "auto-approve-stats";
+const GUIDANCE_ENTRY = "auto-approve-guidance";
+const EDIT_GUIDANCE_CHOICE = "Approve once + edit session guidance…";
 
 type Stats = Record<AutoApproveStat, number>;
 
@@ -113,6 +121,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	const agentDir = getAgentDir();
 	const skillsDir = resolve(agentDir, "skills");
 	const homeDir = homedir();
+	const childToken = process.env[SUBAGENT_TOKEN_ENV];
 	let config: AutoApproveConfig = loadConfig();
 	let mode: Mode = config.defaultMode;
 	// Session-scoped exact calls the user explicitly allowed or denied.
@@ -124,6 +133,92 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	const pendingApprovals = new Map<string, PendingApproval>();
 	const approvalQueue = new ApprovalQueue();
 	let stats = emptyStats();
+	let guidance: ApprovalGuidance = { text: "", revision: 0 };
+
+	function adoptGuidance(next: ApprovalGuidance, ctx: ExtensionContext): void {
+		if (next.revision !== guidance.revision || next.text !== guidance.text) evaluatorCache.clear();
+		guidance = { ...next };
+		updateStatus(ctx);
+	}
+
+	async function exchangeGuidance(request: GuidanceRequest, ctx: ExtensionContext): Promise<ApprovalGuidance> {
+		if (ctx.signal?.aborted) throw new Error("Session guidance request cancelled");
+		if (childToken) {
+			// Managed children route this exact token-marked request to their parent, not the user.
+			const response = await ctx.ui.input(guidanceTitle(childToken), JSON.stringify(request), {
+				signal: ctx.signal, timeout: 10000,
+			});
+			const value: unknown = JSON.parse(response ?? "null");
+			if (!isApprovalGuidance(value)) throw new Error("Parent session guidance is unavailable or changed while editing");
+			adoptGuidance(value, ctx);
+			return { ...value };
+		}
+		if (request.action === "set") {
+			if (request.expectedRevision !== guidance.revision) throw new Error("Session guidance changed while editing; reopen the editor");
+			const next = { text: request.text, revision: guidance.revision + 1 };
+			pi.appendEntry(GUIDANCE_ENTRY, next);
+			adoptGuidance(next, ctx);
+		}
+		return { ...guidance };
+	}
+
+	pi.events.on(APPROVAL_GUIDANCE_CHANNEL, (data) => {
+		const event = data as {
+			request: GuidanceRequest; ctx: ExtensionContext; respond: (value: Promise<ApprovalGuidance>) => void;
+		};
+		event.respond(exchangeGuidance(event.request, event.ctx));
+	});
+
+	pi.events.on(APPROVAL_DIALOG_CHANNEL, (data) => {
+		const request = data as ApprovalDialogRequest;
+		request.respond(selectApproval(request.ctx, request.title, request.choices, undefined, true).then(
+			(result) => result.signal.aborted ? undefined : result.choice,
+		));
+	});
+
+	async function collectGuidance(ctx: ExtensionContext, signal: AbortSignal): Promise<GuidanceRequest | undefined> {
+		const current = await exchangeGuidance({ action: "get" }, ctx);
+		if (signal.aborted) return undefined;
+		const text = await ctx.ui.editor(
+			tagApprovalTitle("Session approval guidance — main agent and all subagents, including future resumes"),
+			current.text,
+		);
+		return text === undefined || signal.aborted ? undefined : { action: "set", text, expectedRevision: current.revision };
+	}
+
+	async function editGuidance(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
+		try {
+			const edit = await collectGuidance(ctx, signal);
+			if (edit) await exchangeGuidance(edit, ctx);
+		} catch (error) {
+			ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
+		}
+	}
+
+	async function selectApproval(
+		ctx: ExtensionContext, title: string, choices: string[], signal?: AbortSignal, forward = false,
+	): Promise<{ choice: string | undefined; signal: AbortSignal }> {
+		return approvalQueue.select(async (dialogSignal) => {
+			const dialogCtx = { ...ctx, signal: dialogSignal };
+			const options = [...choices.filter((choice) => choice !== EDIT_GUIDANCE_CHOICE), EDIT_GUIDANCE_CHOICE];
+			const choice = await ctx.ui.select(tagApprovalTitle(title), options, { signal: dialogSignal });
+			try {
+				const edit = choice === EDIT_GUIDANCE_CHOICE
+					? await collectGuidance(dialogCtx, dialogSignal)
+					: parseGuidanceRequest(choice);
+				if (choice !== EDIT_GUIDANCE_CHOICE && edit?.action !== "set") return choice;
+				if (!edit || dialogSignal.aborted) return undefined;
+				// Only the originating agent commits, after its own cancellation check.
+				// Intermediate parents forward the edit without authorizing a cancelled descendant.
+				if (forward) return JSON.stringify(edit);
+				await exchangeGuidance(edit, dialogCtx);
+				return "Approve once";
+			} catch (error) {
+				ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
+				return undefined;
+			}
+		}, signal ?? ctx.signal);
+	}
 
 	function resetApprovals(): void {
 		approvalQueue.reset();
@@ -157,7 +252,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 
 	function updateStatus(ctx: ExtensionContext): void {
 		const color = mode === "yolo" ? "error" : mode === "auto" ? "accent" : "warning";
-		ctx.ui.setStatus(AUTO_APPROVE_STATUS_KEY, ctx.ui.theme.fg(color, `[${modeLabel(mode)}]`));
+		ctx.ui.setStatus(AUTO_APPROVE_STATUS_KEY, ctx.ui.theme.fg(color, `[${modeLabel(mode)}${guidance.text ? " · session guidance" : ""}]`));
 		if (mode === "yolo") {
 			ctx.ui.setWidget("auto-approve", [
 				ctx.ui.theme.fg("error", "☠️  YOLO MODE — tool calls auto-approved (deny list still blocks)"),
@@ -319,13 +414,8 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		const choices = key
 			? ["Approve once", "Approve (always this exact call this session)", "Deny"]
 			: ["Approve once", "Deny"];
-		const decision = await approvalQueue.select(
-			(signal) => ctx.ui.select(
-				tagApprovalTitle(`Approve tool call?\n\n${preview(toolName, input, ctx.cwd)}\n\n(${reason})`),
-				choices,
-				{ signal },
-			),
-			ctx.signal,
+		const decision = await selectApproval(
+			ctx, `Approve tool call?\n\n${preview(toolName, input, ctx.cwd)}\n\n(${reason})`, choices,
 		);
 		const choice = decision.signal.aborted ? undefined : decision.choice;
 		if (choice === "Approve (always this exact call this session)" && key) {
@@ -379,15 +469,10 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			const justification = params.justification.length > 2000
 				? `${params.justification.slice(0, 2000)}…`
 				: params.justification;
-			const decision = await approvalQueue.select(
-				(dialogSignal) => ctx.ui.select(
-					tagApprovalTitle(
-						`Approve escalated tool call?\n\n${preview(pending.toolName, pending.input, pending.cwd)}\n\nAgent justification:\n${justification}\n\n(Evaluator: ${pending.reason})`,
-					),
-					["Approve once", "Approve (always this exact call this session)", "Deny"],
-					{ signal: dialogSignal },
-				),
-				signal ?? ctx.signal,
+			const decision = await selectApproval(
+				ctx,
+				`Approve escalated tool call?\n\n${preview(pending.toolName, pending.input, pending.cwd)}\n\nAgent justification:\n${justification}\n\n(Evaluator: ${pending.reason})`,
+				["Approve once", "Approve (always this exact call this session)", "Deny"], signal,
 			);
 			const choice = decision.signal.aborted ? undefined : decision.choice;
 
@@ -498,42 +583,43 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			return decision;
 		}
 
-		// mode === "auto": reuse an exact session match or evaluate with the configured model.
-		const instructions = evaluatorInstructions(input, ctx.cwd);
-		let result = config.evaluator.memoize ? evaluatorCache.get(input, instructions) : undefined;
-		if (!result) {
-			const model = await ensureSmallModel(ctx);
-			if (!model) {
-				return softReject(ctx, toolName, rawInput, input, "no evaluator model available", true);
+		// Recheck the authoritative policy before accepting cached or in-flight verdicts.
+		try {
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const policy = await exchangeGuidance({ action: "get" }, ctx);
+				const instructions = evaluatorInstructions(input, ctx.cwd);
+				const effort = config.evaluator.reasoningEffort;
+				let result = config.evaluator.memoize ? evaluatorCache.get(input, instructions, policy) : undefined;
+				const cached = !!result;
+				if (!result) {
+					const model = await ensureSmallModel(ctx);
+					if (!model) return softReject(ctx, toolName, rawInput, input, "no evaluator model available", true);
+					ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
+					try {
+						result = await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, instructions, policy);
+					} finally {
+						ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
+					}
+				}
+				// The final authoritative read is the authorization boundary, even if its RPC response is buffered.
+				const current = await exchangeGuidance({ action: "get" }, ctx);
+				if (current.revision !== policy.revision || current.text !== policy.text || config.evaluator.reasoningEffort !== effort) continue;
+				if (!cached && config.evaluator.memoize) {
+					const entry = evaluatorCache.remember(input, result, instructions, policy);
+					if (entry) pi.appendEntry(EVALUATOR_CACHE_ENTRY, { ...entry, effort });
+				}
+				if (result.decision === "allow") {
+					record("evaluatorAllows", ctx);
+					return undefined;
+				}
+				const failed = result.cacheable === false;
+				return softReject(ctx, toolName, rawInput, input,
+					failed ? result.reason : `evaluator requested review — ${result.reason}`, failed);
 			}
-
-			const effort = config.evaluator.reasoningEffort;
-			ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
-			try {
-				result = await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, instructions);
-			} finally {
-				ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
-			}
-
-			if (config.evaluator.memoize && config.evaluator.reasoningEffort === effort) {
-				const entry = evaluatorCache.remember(input, result, instructions);
-				if (entry) pi.appendEntry(EVALUATOR_CACHE_ENTRY, { ...entry, effort });
-			}
+			return softReject(ctx, toolName, rawInput, input, "session policy kept changing during evaluation; retry", true);
+		} catch (error) {
+			return softReject(ctx, toolName, rawInput, input, error instanceof Error ? error.message : String(error), true);
 		}
-
-		if (result.decision === "allow") {
-			record("evaluatorAllows", ctx);
-			return undefined;
-		}
-		const failed = result.cacheable === false;
-		return softReject(
-			ctx,
-			toolName,
-			rawInput,
-			input,
-			failed ? result.reason : `evaluator requested review — ${result.reason}`,
-			failed,
-		);
 	});
 
 	/** `/auto test` target: a registered tool followed by a JSON object, else a bash command. */
@@ -554,7 +640,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("auto", {
-		description: "Auto-approval: /auto [manual|auto|yolo|effort [low|medium|high]|stats|test <cmd>]",
+		description: "Auto-approval: /auto [manual|auto|yolo|guidance [clear]|effort [low|medium|high]|stats|test <cmd>]",
 		handler: async (args, ctx) => {
 			const trimmed = (args ?? "").trim();
 
@@ -573,6 +659,27 @@ export default function autoApprove(pi: ExtensionAPI): void {
 
 			if (isMode(trimmed)) {
 				setMode(trimmed, ctx);
+				return;
+			}
+
+			if (trimmed === "guidance" || trimmed === "guidance clear") {
+				if (!ctx.hasUI) {
+					ctx.ui.notify("Session guidance requires a user UI", "warning");
+					return;
+				}
+				await approvalQueue.select(async (signal) => {
+					if (trimmed === "guidance") {
+						await editGuidance({ ...ctx, signal }, signal);
+					} else {
+						try {
+							const current = await exchangeGuidance({ action: "get" }, ctx);
+							if (!signal.aborted) await exchangeGuidance({ action: "set", text: "", expectedRevision: current.revision }, ctx);
+						} catch (error) {
+							ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
+						}
+					}
+					return undefined;
+				}, ctx.signal);
 				return;
 			}
 
@@ -617,11 +724,18 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					ctx.ui.notify("auto-approve: no evaluator model available", "warning");
 					return;
 				}
+				let policy: ApprovalGuidance;
+				try {
+					policy = await exchangeGuidance({ action: "get" }, ctx);
+				} catch (error) {
+					ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
+					return;
+				}
 				const instructions = evaluatorInstructions(buildMatchInput(call.toolName, call.input), ctx.cwd);
 				ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 				let result: Awaited<ReturnType<typeof evaluateSafety>>;
 				try {
-					result = await evaluateSafety(model, ctx, call.toolName, call.input, config.evaluator, instructions);
+					result = await evaluateSafety(model, ctx, call.toolName, call.input, config.evaluator, instructions, policy);
 				} finally {
 					ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
 				}
@@ -629,7 +743,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				return;
 			}
 
-			ctx.ui.notify(`Unknown: /auto ${trimmed}\nUse: manual | auto | yolo | effort [low|medium|high] | stats | test <cmd> | test <tool> <json>`, "warning");
+			ctx.ui.notify(`Unknown: /auto ${trimmed}\nUse: manual | auto | yolo | guidance [clear] | effort [low|medium|high] | stats | test <cmd> | test <tool> <json>`, "warning");
 		},
 	});
 
@@ -654,6 +768,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			data?: { mode?: unknown; effort?: unknown; key?: unknown };
 		}>;
 		mode = config.defaultMode;
+		guidance = { text: "", revision: 0 };
 		alwaysAllow.clear();
 		humanDenied.clear();
 		evaluatorCache.clear();
@@ -661,6 +776,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		for (const e of entries) {
 			if (e.type !== "custom") continue;
 			const data = e.data as { mode?: unknown; effort?: unknown; key?: unknown } | undefined;
+			if (e.customType === GUIDANCE_ENTRY && isApprovalGuidance(e.data)) guidance = { ...e.data };
 			if (e.customType === MODE_ENTRY && isMode(data?.mode)) mode = data.mode;
 			if (e.customType === MEMO_ENTRY && typeof data?.key === "string") alwaysAllow.add(data.key);
 			if (e.customType === HUMAN_DENY_ENTRY && typeof data?.key === "string") humanDenied.add(data.key);

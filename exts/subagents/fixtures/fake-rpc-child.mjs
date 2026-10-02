@@ -7,6 +7,7 @@ const sessionFile = args.includes("--session") ? args[args.indexOf("--session") 
 const sessionId = args.includes("--session") ? JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]).id : args[args.indexOf("--session-id") + 1];
 const token = process.env.PI_SUBAGENT_TOKEN;
 let pending;
+let guidanceDialog;
 let mode;
 let acknowledgePolicy = true;
 let slowDiscovery = false;
@@ -130,6 +131,21 @@ function processLine(line) {
 			finish(process.cwd());
 			return;
 		}
+		if (command.message.startsWith("Task: guidance")) {
+			const dialog = command.message === "Task: guidance dialog";
+			guidanceDialog = dialog ? {} : undefined;
+			if (dialog) send({
+				type: "extension_ui_request", id: "guidance-approval", method: "select",
+				title: `[[pi-subagent-approval:${token}]]Approve a Linear update`,
+				options: ["Approve once", "Deny", "Approve once + edit session guidance…"],
+			});
+			send({
+				type: "extension_ui_request", id: "guidance-state", method: "input",
+				title: `[[pi-subagent-guidance:${command.message.includes("wrong token") ? `${token}-wrong` : token}]]`,
+				placeholder: command.message.includes("invalid") ? "not JSON" : JSON.stringify({ action: "get" }),
+			});
+			return;
+		}
 		if (command.message.startsWith("Task: approval")) {
 			pending = "approval";
 			reportAutoApproveStat("softRejections");
@@ -201,6 +217,19 @@ function processLine(line) {
 		return;
 	}
 	if (command.type === "extension_ui_response") {
+		if (command.id.startsWith("guidance-")) {
+			if (guidanceDialog) {
+				if (command.id === "guidance-approval" && command.value?.startsWith("{")) {
+					send({ type: "extension_ui_request", id: "guidance-commit", method: "input",
+						title: `[[pi-subagent-guidance:${token}]]`, placeholder: command.value });
+					return;
+				}
+				if (command.id === "guidance-commit") guidanceDialog["guidance-approval"] = command.cancelled ? "cancelled" : "Approve once";
+				else guidanceDialog[command.id] = command.value ?? "cancelled";
+				if (Object.keys(guidanceDialog).length === 2) finish(JSON.stringify(guidanceDialog));
+			} else finish(command.value ?? "cancelled");
+			return;
+		}
 		if (pending === "question") finish(`answer: ${command.value ?? "cancelled"}`);
 		else if (pending === "approval") {
 			if (typeof command.value === "string" && command.value.startsWith("Approve")) {

@@ -23,6 +23,7 @@ import {
 	SUBAGENT_RUN_ID_ENV,
 	SUBAGENT_TOKEN_ENV,
 } from "../shared/subagent-protocol.ts";
+import { requestApprovalDialog, requestGuidance } from "../shared/approval-guidance.ts";
 import {
 	discoverNamedAgents,
 	type DispatchDefaults,
@@ -252,6 +253,8 @@ export default function subagents(pi: ExtensionAPI): void {
 	const manager = new SubagentManager({
 		onLiveCountChange: refreshStatus,
 		onAutoApproveStat: (stat) => pi.events.emit(AUTO_APPROVE_STAT_CHANNEL, { stat }),
+		onGuidanceRequest: (request, ctx) => requestGuidance(pi, ctx, request),
+		onApprovalRequest: (ctx, title, choices) => requestApprovalDialog(pi, ctx, title, choices),
 		onStateChange: (runs) => {
 			try {
 				pi.appendEntry(SUBAGENT_STATE_ENTRY, subagentState(runs));
@@ -357,7 +360,7 @@ export default function subagents(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_continue",
 		label: "Continue Subagent",
-		description: "Assign a related task to an idle subagent, retaining its process and conversation context. Reuses its agent, model, thinking level, cwd, and tools; inherits the parent's current approval mode. Returns at task completion or a supervisor question. Use subagent_reply for waiting questions; ended agents cannot be reused.",
+		description: "Assign a related task to an idle subagent, retaining its process and conversation context. Reuses its agent, model, thinking level, cwd, and tools; inherits the parent's current approval mode and session guidance. Returns at task completion or a supervisor question. Use subagent_reply for waiting questions; ended agents cannot be reused.",
 		parameters: Type.Object({
 			id: Type.String({ minLength: 1, description: "Idle subagent ID" }),
 			task: TaskFields.task,

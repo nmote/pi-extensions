@@ -1,4 +1,5 @@
 import type { EvaluationResult } from "./evaluator.ts";
+import { type ApprovalGuidance, isApprovalGuidance } from "../shared/approval-guidance.ts";
 import { type MatchInput, signatureOf } from "./rules.ts";
 
 export const EVALUATOR_CACHE_ENTRY = "auto-approve-evaluation";
@@ -11,10 +12,11 @@ export interface CachedEvaluation {
 	input: Record<string, unknown>;
 	/** Evaluator instructions used for this verdict. */
 	instructions: string[];
+	guidance?: ApprovalGuidance;
 	output: EvaluationResult;
 }
 
-function cacheKey(input: MatchInput, instructions: readonly string[]): string | undefined {
+function cacheKey(input: MatchInput, instructions: readonly string[], guidance?: ApprovalGuidance): string | undefined {
 	let inputKey: string;
 	if (input.tool === "bash") {
 		inputKey = signatureOf(input);
@@ -25,7 +27,8 @@ function cacheKey(input: MatchInput, instructions: readonly string[]): string | 
 			return undefined;
 		}
 	}
-	return `${inputKey}\u0000${JSON.stringify(instructions)}`;
+	const policy = guidance && (guidance.revision > 0 || guidance.text) ? `\u0000${JSON.stringify(guidance)}` : "";
+	return `${inputKey}\u0000${JSON.stringify(instructions)}${policy}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -54,8 +57,8 @@ function normalizeEvaluationResult(value: unknown): EvaluationResult | undefined
 export class EvaluatorCache {
 	private readonly outputs = new Map<string, EvaluationResult>();
 
-	get(input: MatchInput, instructions: readonly string[] = []): EvaluationResult | undefined {
-		const key = cacheKey(input, instructions);
+	get(input: MatchInput, instructions: readonly string[] = [], guidance?: ApprovalGuidance): EvaluationResult | undefined {
+		const key = cacheKey(input, instructions, guidance);
 		return key === undefined ? undefined : this.outputs.get(key);
 	}
 
@@ -63,11 +66,13 @@ export class EvaluatorCache {
 		input: MatchInput,
 		output: EvaluationResult,
 		instructions: readonly string[] = [],
+		guidance?: ApprovalGuidance,
 	): CachedEvaluation | undefined {
-		const key = cacheKey(input, instructions);
+		const key = cacheKey(input, instructions, guidance);
 		if (key === undefined || output.cacheable === false) return undefined;
 		this.outputs.set(key, output);
-		return { tool: input.tool, command: input.subject, input: input.raw, instructions: [...instructions], output };
+		return { tool: input.tool, command: input.subject, input: input.raw, instructions: [...instructions],
+			...(guidance ? { guidance: { ...guidance } } : {}), output };
 	}
 
 	restore(value: unknown): boolean {
@@ -77,6 +82,7 @@ export class EvaluatorCache {
 			command?: unknown;
 			input?: unknown;
 			instructions?: unknown;
+			guidance?: unknown;
 			output?: unknown;
 		};
 		if (typeof entry.tool !== "string" || typeof entry.command !== "string" || !isRecord(entry.input)) {
@@ -84,9 +90,9 @@ export class EvaluatorCache {
 		}
 		const instructions = normalizeInstructions(entry.instructions);
 		const output = normalizeEvaluationResult(entry.output);
-		if (!instructions || !output) return false;
+		if (!instructions || !output || (entry.guidance !== undefined && !isApprovalGuidance(entry.guidance))) return false;
 		if (entry.tool === "bash" && entry.input.command !== entry.command) return false;
-		const key = cacheKey({ tool: entry.tool, subject: entry.command, raw: entry.input }, instructions);
+		const key = cacheKey({ tool: entry.tool, subject: entry.command, raw: entry.input }, instructions, entry.guidance as ApprovalGuidance | undefined);
 		if (key === undefined) return false;
 		this.outputs.set(key, output);
 		return true;

@@ -136,6 +136,18 @@ Evaluator effort defaults to `medium`; override it with
 Evaluator failure/review never grants access; prompts
 without a usable UI block. **This is not an OS sandbox.**
 
+Approval dialogs offer **Approve once + edit session guidance…**. `/auto guidance`
+views/edits the same text; `/auto guidance clear` revokes it. Guidance is stored
+in the main Pi session and remains active across resumes and reloads for that
+agent and all subagents. A footer indicator marks active guidance. Name the
+allowed operations and targets explicitly: the evaluator does not see the
+conversation. Session guidance overrides conflicting evaluator defaults/context
+within its scope, but not deny rules, explicit human denials, or injection/output
+safeguards. It affects only evaluated calls, not allowlisted calls or manual/yolo
+behavior. Changes invalidate cached and in-flight verdicts. The final main-session
+policy check is the authorization boundary; calls authorized there may still
+execute after revocation. Clearing does not revoke separate exact-call approvals.
+
 `/small-model` selects the shared approval/topic model from authenticated models;
 there is no default. `/subagent-models` optionally selects basic/routine/complex
 preferences; unset slots inherit the session model. Model calls may incur costs.

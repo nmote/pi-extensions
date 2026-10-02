@@ -46,6 +46,7 @@ export class RpcProcess {
 		private readonly env: NodeJS.ProcessEnv,
 		private readonly onEvent: RpcEventHandler,
 		private readonly onExit: RpcExitHandler,
+		private readonly isConcurrentEvent?: (event: Record<string, any>) => boolean,
 	) {}
 
 	async start(args: string[]): Promise<void> {
@@ -80,9 +81,15 @@ export class RpcProcess {
 				}
 			}
 
-			this.eventQueue = this.eventQueue.then(() => this.onEvent(event)).catch((error) => {
+			// Internal policy exchanges must not wait behind an open approval dialog.
+			const concurrent = this.isConcurrentEvent?.(event);
+			const work = concurrent
+				? Promise.resolve().then(() => this.onEvent(event))
+				: this.eventQueue.then(() => this.onEvent(event));
+			const handled = work.catch((error) => {
 				this.fail(error instanceof Error ? error : new Error(String(error)));
 			});
+			if (!concurrent) this.eventQueue = handled;
 		};
 
 		child.stdout.on("data", (chunk: Buffer) => {
