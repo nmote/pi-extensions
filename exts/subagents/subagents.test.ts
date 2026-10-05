@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AutoApproveStat } from "../shared/subagent-protocol.ts";
+import { type AutoApproveStat, SUBAGENT_RUN_ID_ENV, SUBAGENT_TOKEN_ENV, SUBAGENT_PROTOCOL_ENV, SUBAGENT_HANDSHAKE_COMMAND, protocolAck } from "../shared/subagent-protocol.ts";
 import {
 	discoverNamedAgents,
 	formatNamedAgentCatalog,
@@ -14,6 +14,7 @@ import {
 import { formatSpawnCall, summarizePurpose } from "./purpose.ts";
 import subagents from "./index.ts";
 import { SubagentManager } from "./manager.ts";
+import { RpcProcess } from "./rpc.ts";
 import { restoreSubagents, SUBAGENT_STATE_ENTRY } from "./state.ts";
 import { createProgressReporter, type SubagentDetails } from "./progress.ts";
 import {
@@ -87,6 +88,44 @@ async function errorMessage(promise: Promise<unknown>): Promise<string> {
 	} catch (error) {
 		return error instanceof Error ? error.message : String(error);
 	}
+}
+
+const childEnvKeys = [SUBAGENT_RUN_ID_ENV, SUBAGENT_TOKEN_ENV, SUBAGENT_PROTOCOL_ENV];
+const savedChildEnv = childEnvKeys.map((key) => process.env[key]);
+try {
+	process.env[SUBAGENT_RUN_ID_ENV] = "test-child";
+	process.env[SUBAGENT_TOKEN_ENV] = "test-token";
+	const handlers = new Map<string, any>();
+	const commands = new Map<string, any>();
+	subagents({
+		on: (name: string, handler: any) => handlers.set(name, handler),
+		registerCommand: (name: string, command: any) => commands.set(name, command),
+		registerTool() {},
+	} as unknown as ExtensionAPI);
+	const notices: string[] = [];
+	const ctx = { ...context({ notify: (message) => notices.push(message) }), mode: "rpc" };
+	const legacyEnv = { ...process.env };
+	delete legacyEnv[SUBAGENT_PROTOCOL_ENV];
+	const legacyChild = new RpcProcess(
+		{ command: process.execPath, argsPrefix: ["--import", "tsx", join(testDir, "fixtures/protocol-startup-child.ts")] },
+		process.cwd(), legacyEnv, () => {}, () => {},
+	);
+	try {
+		const message = await errorMessage(legacyChild.start([]));
+		check("legacy parent receives a failed exit with reload guidance", message.includes("code=1") && message.includes("parent=legacy, child=1") && message.includes("/reload"));
+	} finally {
+		await legacyChild.stop();
+	}
+	process.env[SUBAGENT_PROTOCOL_ENV] = "1";
+	handlers.get("session_start")({}, ctx);
+	await commands.get(SUBAGENT_HANDSHAKE_COMMAND).handler("test-token 1", ctx);
+	check("matching child acknowledges the loaded protocol", notices.at(-1) === protocolAck("test-token", "1"));
+	check("handshake rejects a different token", (await errorMessage(commands.get(SUBAGENT_HANDSHAKE_COMMAND).handler("wrong-token 1", ctx))).includes("Invalid subagent handshake"));
+} finally {
+	childEnvKeys.forEach((key, index) => {
+		if (savedChildEnv[index] === undefined) delete process.env[key];
+		else process.env[key] = savedChildEnv[index];
+	});
 }
 
 const managers: SubagentManager[] = [];
@@ -398,6 +437,28 @@ try {
 	const failedTask = (await failedAgent.start([task("fail")], process.cwd(), context()))[0]!;
 	check("failed child cannot be reused", failedTask.status === "failed" && (await errorMessage(failedAgent.continue(failedTask.id, "wrong", () => "manual", context()))).includes("while failed"));
 	const missingPolicy = makeManager();
+	const previousProtocol = process.env.FAKE_PROTOCOL;
+	try {
+		for (const [version, diagnostic] of [["legacy", "parent=1, child=legacy"], ["2", "parent=1, child=2"], ["no-ack", "not acknowledged"]]) {
+			process.env.FAKE_PROTOCOL = version;
+			const [result] = await makeManager().start([task("must not run")], process.cwd(), context());
+			check(`protocol ${version} fails before model execution`, result.status === "failed" && !!result.error?.includes(diagnostic) && result.usage.totalTokens === 0 && result.output === undefined);
+		}
+		delete process.env.FAKE_PROTOCOL;
+		const original = makeManager();
+		const [retained] = await original.start([task("recall persistent")], process.cwd(), context());
+		const state = original.persistedState();
+		await original.shutdown();
+		const restored = makeManager();
+		restored.restore(state);
+		process.env.FAKE_PROTOCOL = "2";
+		const result = await restored.continue(retained.id, "must not run", () => "auto", context());
+		check("reopened processes repeat the protocol handshake", result.status === "failed" && !!result.error?.includes("parent=1, child=2") && result.usage.totalTokens === 0);
+	} finally {
+		if (previousProtocol === undefined) delete process.env.FAKE_PROTOCOL;
+		else process.env.FAKE_PROTOCOL = previousProtocol;
+	}
+
 	const policyTask = (await missingPolicy.start([task("no policy")], process.cwd(), context()))[0]!;
 	const noAck = await missingPolicy.continue(policyTask.id, "recall", () => "manual", context());
 	check("missing policy acknowledgement fails closed", noAck.status === "failed" && !!noAck.error?.includes("not acknowledged") && noAck.output === undefined);

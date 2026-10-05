@@ -1,4 +1,5 @@
 import { SUBAGENTS_STATUS_KEY } from "../shared/footer-status.ts";
+import { writeSync } from "node:fs";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	type AgentToolResult,
@@ -18,6 +19,11 @@ import {
 	AUTO_APPROVE_STAT_CHANNEL,
 	AUTO_APPROVE_TASK_CHANNEL,
 	SUBAGENT_TASK_COMMAND,
+	SUBAGENT_HANDSHAKE_COMMAND,
+	SUBAGENT_PROTOCOL_ENV,
+	SUBAGENT_PROTOCOL_VERSION,
+	protocolAck,
+	protocolMismatch,
 	taskPolicyAck,
 	questionTitle,
 	SUBAGENT_RUN_ID_ENV,
@@ -198,6 +204,26 @@ function getAutoApproveMode(pi: ExtensionAPI): string {
 
 function registerChildTool(pi: ExtensionAPI, token: string): void {
 	pi.on("cache_warming_decision", () => ({ action: "stop" }));
+	pi.on("session_start", (_event, ctx) => {
+		const parent = process.env[SUBAGENT_PROTOCOL_ENV];
+		if (parent === String(SUBAGENT_PROTOCOL_VERSION)) return;
+		const message = protocolMismatch(parent, String(SUBAGENT_PROTOCOL_VERSION));
+		ctx.ui.notify(message, "error");
+		// Legacy parents preserve stderr only on unsuccessful process exit.
+		writeSync(2, `${message}\n`);
+		process.exit(1);
+	});
+	pi.registerCommand(SUBAGENT_HANDSHAKE_COMMAND, {
+		description: "Internal managed-subagent protocol handshake",
+		handler: async (args, ctx) => {
+			const [providedToken, parent, extra] = args.trim().split(/\s+/);
+			if (ctx.mode !== "rpc" || providedToken !== token || extra) throw new Error("Invalid subagent handshake");
+			if (parent !== String(SUBAGENT_PROTOCOL_VERSION)) {
+				throw new Error(protocolMismatch(parent, String(SUBAGENT_PROTOCOL_VERSION)));
+			}
+			ctx.ui.notify(protocolAck(token, String(SUBAGENT_PROTOCOL_VERSION)), "info");
+		},
+	});
 	pi.registerCommand(SUBAGENT_TASK_COMMAND, {
 		description: "Internal managed-subagent task policy update",
 		handler: async (args, ctx) => {

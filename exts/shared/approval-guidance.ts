@@ -21,6 +21,46 @@ export async function requestApprovalDialog(
 	return result;
 }
 
+const GUIDANCE_ERROR_CODES = ["GUIDANCE_UNAVAILABLE", "GUIDANCE_REVISION_CONFLICT", "REQUEST_CANCELLED", "PROTOCOL_MISMATCH"] as const;
+export type GuidanceErrorCode = (typeof GUIDANCE_ERROR_CODES)[number];
+
+// Pi loads shared modules separately for each extension.
+export function isGuidanceError(error: unknown): error is { code: GuidanceErrorCode; message: string } {
+	if (!error || typeof error !== "object") return false;
+	const value = error as Record<string, unknown>;
+	return typeof value.code === "string" && GUIDANCE_ERROR_CODES.includes(value.code as GuidanceErrorCode) && typeof value.message === "string";
+}
+
+export class GuidanceError extends Error {
+	constructor(readonly code: GuidanceErrorCode, message: string) {
+		super(message);
+	}
+}
+
+export type GuidanceResponse = { ok: true; guidance: ApprovalGuidance } | { ok: false; code: GuidanceErrorCode; message: string };
+
+export function guidanceFailure(error: unknown): GuidanceResponse {
+	return {
+		ok: false,
+		code: isGuidanceError(error) ? error.code : "GUIDANCE_UNAVAILABLE",
+		message: isGuidanceError(error) || error instanceof Error ? error.message : "Session guidance is unavailable",
+	};
+}
+
+export function decodeGuidanceResponse(response: string | undefined): ApprovalGuidance {
+	if (response === undefined) throw new GuidanceError("REQUEST_CANCELLED", "Session guidance request cancelled or timed out");
+	let parsed: unknown;
+	try { parsed = JSON.parse(response); } catch { /* Reject malformed protocol responses. */ }
+	if (parsed && typeof parsed === "object") {
+		const value = parsed as Record<string, unknown>;
+		if (value.ok === true && isApprovalGuidance(value.guidance)) return value.guidance;
+		if (value.ok === false && isGuidanceError(value)) {
+			throw new GuidanceError(value.code, value.message);
+		}
+	}
+	throw new GuidanceError("PROTOCOL_MISMATCH", "Invalid session guidance response. Run /reload in the parent session, then restart the subagent.");
+}
+
 export interface ApprovalGuidance {
 	text: string;
 	revision: number;
@@ -56,7 +96,7 @@ export async function requestGuidance(
 	pi.events.emit(APPROVAL_GUIDANCE_CHANNEL, {
 		request, ctx, respond: (value: Promise<ApprovalGuidance>) => { result = value; },
 	});
-	if (!result) throw new Error("Session guidance is unavailable");
+	if (!result) throw new GuidanceError("GUIDANCE_UNAVAILABLE", "Session guidance is unavailable; ensure auto-approve is loaded in the parent session");
 	return result;
 }
 

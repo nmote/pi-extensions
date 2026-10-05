@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SubagentManager } from "../subagents/manager.ts";
 import autoApprove from "./index.ts";
-import { requestApprovalDialog, requestGuidance } from "../shared/approval-guidance.ts";
+import { requestApprovalDialog, requestGuidance, guidanceFailure, decodeGuidanceResponse, GuidanceError } from "../shared/approval-guidance.ts";
 import { SUBAGENT_TOKEN_ENV } from "../shared/subagent-protocol.ts";
 
 let failures = 0;
@@ -34,6 +34,7 @@ function harness(entries: Entry[] = [], parent?: { pi: any; ctx: any }, token = 
 	const selections: string[] = [];
 	const editors: string[] = [];
 	const controls = {
+		stopped: false,
 		choice: "Approve once + edit session guidance…" as string | undefined,
 		editor: async (_prefill: string): Promise<string | undefined> => "Allow Linear updates in project X",
 		evaluate: async (prompt: string) => verdict(prompt.includes("Session guidance (trusted user authorization)") ? "allow" : "review"),
@@ -52,6 +53,7 @@ function harness(entries: Entry[] = [], parent?: { pi: any; ctx: any }, token = 
 	};
 	const ctx = {
 		cwd: "/workspace", hasUI: true, signal: undefined as AbortSignal | undefined,
+		shutdown: () => { controls.stopped = true; },
 		sessionManager: { getEntries: () => entries },
 		modelRegistry: {
 			getAvailable: () => [{ provider: "test", id: "small" }], hasConfiguredAuth: () => true,
@@ -68,8 +70,8 @@ function harness(entries: Entry[] = [], parent?: { pi: any; ctx: any }, token = 
 			editor: async (title: string, prefill: string) => { editors.push(title); return controls.editor(prefill); },
 			input: async (title: string, request: string): Promise<string | undefined> => {
 				if (!parent || title !== `[[pi-subagent-guidance:${token}]]`) return undefined;
-				try { return JSON.stringify(await requestGuidance(parent.pi as any, parent.ctx as any, JSON.parse(request))); }
-				catch { return undefined; }
+				try { return JSON.stringify({ ok: true, guidance: await requestGuidance(parent.pi as any, parent.ctx as any, JSON.parse(request)) }); }
+				catch (error) { return JSON.stringify(guidanceFailure(error)); }
 			},
 		},
 	};
@@ -93,6 +95,22 @@ function harness(entries: Entry[] = [], parent?: { pi: any; ctx: any }, token = 
 			return tools.get("request_tool_approval").execute("approval", { requestId, justification: "needed" }, signal, undefined, ctx);
 		},
 	};
+}
+
+class OtherExtensionGuidanceError extends Error {
+	constructor(readonly code: "GUIDANCE_UNAVAILABLE" | "GUIDANCE_REVISION_CONFLICT" | "REQUEST_CANCELLED", message: string) { super(message); }
+}
+for (const code of ["GUIDANCE_UNAVAILABLE", "GUIDANCE_REVISION_CONFLICT", "REQUEST_CANCELLED"] as const) {
+	try {
+		decodeGuidanceResponse(JSON.stringify(guidanceFailure(new OtherExtensionGuidanceError(code, `specific ${code}`))));
+		check(`${code} crosses extension class boundaries`, false);
+	} catch (error) {
+		check(`${code} crosses extension class boundaries`, error instanceof GuidanceError && error.code === code && error.message === `specific ${code}`);
+	}
+}
+for (const response of ['{"text":"legacy","revision":0}', "not json"]) {
+	try { decodeGuidanceResponse(response); check("invalid protocol response fails closed", false); }
+	catch (error) { check("invalid protocol response fails closed", error instanceof GuidanceError && error.code === "PROTOCOL_MISMATCH" && error.message.includes("/reload")); }
 }
 
 const temp = mkdtempSync(join(tmpdir(), "pi-guidance-test-"));
@@ -200,6 +218,9 @@ try {
 	await sibling.gate("sibling");
 	sibling.ctx.ui.input = async () => undefined;
 	check("policy exchange failure blocks even a previously cached allow", (await sibling.gate("sibling"))?.block === true);
+	sibling.ctx.ui.input = async () => '{"text":"legacy","revision":0}';
+	await sibling.gate("sibling");
+	check("invalid guidance protocol stops the child with a diagnostic", sibling.controls.stopped && sibling.notices.some((notice) => notice.startsWith("Subagent protocol failure:") && notice.includes("/reload")));
 	check("guidance cannot override hard denies", (await root.gate("forbidden", "forbidden"))?.reason.includes("deny list"));
 	check("guidance is stored as ordinary Pi session entries", root.entries.some((entry) => entry.type === "custom" && entry.customType === "auto-approve-guidance"));
 
@@ -229,10 +250,12 @@ try {
 	const editorAnswer = deferred<string | undefined>();
 	rpcRoot.controls.editor = async () => { editorOpened.resolve(); return editorAnswer.promise; };
 	let policyReads = 0;
+	const firstPolicyRead = deferred<void>();
 	const manager = new SubagentManager({
 		invocation: { command: process.execPath, argsPrefix: [fileURLToPath(new URL("../subagents/fixtures/fake-rpc-child.mjs", import.meta.url))] },
 		onGuidanceRequest: (request, ctx) => {
 			policyReads++;
+			firstPolicyRead.resolve();
 			return requestGuidance(rpcRoot.pi as any, ctx, request);
 		},
 		onApprovalRequest: (ctx, title, choices) => requestApprovalDialog(rpcRoot.pi as any, ctx, title, choices),
@@ -240,7 +263,9 @@ try {
 	try {
 		const running = manager.start([{ task: "guidance dialog", agent: "general", cwd: process.cwd(), systemPrompt: "test" }], process.cwd(), rpcRoot.ctx as any);
 		await editorOpened.promise;
-		await flush();
+		const readTimeout = setTimeout(() => firstPolicyRead.resolve(), 2000);
+		await firstPolicyRead.promise;
+		clearTimeout(readTimeout);
 		check("RPC policy reads bypass an open approval editor in the same child", policyReads === 1);
 		editorAnswer.resolve("Allow Linear updates in project RPC");
 		const [completed] = await running;
@@ -250,7 +275,7 @@ try {
 		const followup = await manager.continue(completed.id, "guidance get", () => "auto", rpcRoot.ctx as any);
 		check("retained children read current authoritative guidance over RPC", JSON.parse(followup.output!).revision === 1);
 		const malformed = await manager.continue(completed.id, "guidance invalid", () => "auto", rpcRoot.ctx as any);
-		check("malformed internal requests fail closed without a user dialog", malformed.output === "cancelled" && rpcRoot.selections.length === 1);
+		check("malformed internal requests fail closed without a user dialog", malformed.output === "GUIDANCE_UNAVAILABLE" && rpcRoot.selections.length === 1);
 		const beforeCounterfeit = policyReads;
 		const counterfeit = await manager.continue(completed.id, "guidance wrong token", () => "auto", rpcRoot.ctx as any);
 		check("a different token cannot access the internal policy bridge", counterfeit.output === "cancelled" && policyReads === beforeCounterfeit);

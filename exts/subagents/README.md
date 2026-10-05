@@ -7,6 +7,7 @@ Delegates focused work to isolated Pi children that can ask their parent for gui
 - `/subagents` — Show child status and named-agent discovery errors; `/subagents cancel <id|all>` ends children.
 - `/subagent-models [basic|routine|complex [clear]]` — Show model preferences, pick a model for a task tier, or clear that preference. Unset tiers inherit the session model.
 - `/_subagent-task` — Internal child-only approval-policy update; not for manual use.
+- `/_subagent-handshake` — Internal child-only protocol check; not for manual use.
 
 ## Agent tools
 
@@ -19,6 +20,8 @@ Delegates focused work to isolated Pi children that can ask their parent for gui
 - `ask_supervisor` — Child-only tool to pause for missing context or a consequential choice; tool-approval requests instead go directly to you.
 
 ## Lifecycle
+
+Each child process must match the parent's loaded protocol version and acknowledge a handshake before model execution, including after resume. A mismatch stops the child: run `/reload` in the parent, then restart the child. Handshake timeouts and missing acknowledgements are reported separately. Protocol versions change only for incompatible wire-format or approval-policy changes.
 
 Successful children remain idle for related follow-up work, retaining their conversation (subject to Pi compaction), instructions, model, thinking level, cwd, and tools. Each follow-up inherits the parent's current approval mode and guidance. Exact-call approvals persist; one-shot approvals expire between tasks. Cwd approval lasts for the child's lifetime.
 

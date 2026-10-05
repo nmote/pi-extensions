@@ -10,12 +10,17 @@ import {
 	parseApprovalTitle,
 	parseAutoApproveStat,
 	SUBAGENT_TASK_COMMAND,
+	SUBAGENT_HANDSHAKE_COMMAND,
+	SUBAGENT_PROTOCOL_ENV,
+	SUBAGENT_PROTOCOL_VERSION,
+	protocolAck,
+	protocolMismatch,
 	taskPolicyAck,
 	SUBAGENT_RUN_ID_ENV,
 	SUBAGENT_TOKEN_ENV,
 } from "../shared/subagent-protocol.ts";
 import {
-	type ApprovalGuidance, type GuidanceRequest, isGuidanceTitle, parseGuidanceRequest,
+	type ApprovalGuidance, type GuidanceRequest, isGuidanceTitle, parseGuidanceRequest, GuidanceError, guidanceFailure,
 } from "../shared/approval-guidance.ts";
 import type { ResolvedSubagentTask } from "./agents.ts";
 import { type PiInvocation, resolvePiInvocation, RpcProcess } from "./rpc.ts";
@@ -158,6 +163,7 @@ function createChildEnvironment(runId: string, token: string, cwd: string): Node
 	env.PWD = cwd;
 	env[SUBAGENT_RUN_ID_ENV] = runId;
 	env[SUBAGENT_TOKEN_ENV] = token;
+	env[SUBAGENT_PROTOCOL_ENV] = String(SUBAGENT_PROTOCOL_VERSION);
 	return env;
 }
 
@@ -233,6 +239,8 @@ class SubagentRun {
 	private promptDir?: string;
 	private hooks?: OperationHooks;
 	private pendingQuestion?: PendingQuestion;
+	private expectedProtocolAck?: string;
+	private childProtocolVersion?: string;
 	private expectedPolicyAck?: string;
 	private policyAcknowledged = false;
 	private preparingTask = false;
@@ -364,6 +372,7 @@ class SubagentRun {
 				(event) => this.isGuidanceEvent(event),
 			);
 			await this.rpc.start(this.buildArguments());
+			if (!this.isStopped()) await this.handshake();
 			if (this.isStopped()) {
 				await this.rpc.stop();
 				await this.cleanupPrompt();
@@ -472,7 +481,34 @@ class SubagentRun {
 			(event) => this.isGuidanceEvent(event),
 		);
 		await this.rpc.start(this.buildArguments(sessionFile));
+		if (!this.isStopped()) await this.handshake();
 		if (this.isStopped()) await this.rpc.stop();
+	}
+
+	private async handshake(): Promise<void> {
+		const rpc = this.rpc!;
+		const version = String(SUBAGENT_PROTOCOL_VERSION);
+		try {
+			const commands = await rpc.send({ type: "get_commands" });
+			if (!commands.data?.commands?.some((command: { name: string }) => command.name === SUBAGENT_HANDSHAKE_COMMAND)) {
+				throw new Error(protocolMismatch(version, undefined));
+			}
+			this.expectedProtocolAck = protocolAck(this.token, version);
+			this.childProtocolVersion = undefined;
+			const response = await rpc.send({ type: "prompt", message: `/${SUBAGENT_HANDSHAKE_COMMAND} ${this.token} ${version}` });
+			await rpc.flushEvents();
+			if (this.childProtocolVersion !== undefined && this.childProtocolVersion !== version) {
+				throw new Error(protocolMismatch(version, this.childProtocolVersion));
+			}
+			if (response.data?.disposition !== "handled" || this.childProtocolVersion === undefined) {
+				throw new Error("Subagent protocol handshake was not acknowledged. Run /reload in the parent session, then restart the subagent.");
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(message.startsWith("Timed out") ? "Subagent protocol handshake timed out. Restart the subagent; if it persists, reload the parent session." : message);
+		} finally {
+			this.expectedProtocolAck = undefined;
+		}
 	}
 
 	async suspend(): Promise<void> {
@@ -612,6 +648,14 @@ class SubagentRun {
 		}
 		if (event.type === "extension_ui_request") {
 			const request = event as RpcExtensionUIRequest;
+			if (request.method === "notify" && typeof request.message === "string" && (request.message.startsWith("Subagent protocol mismatch:") || request.message.startsWith("Subagent protocol failure:"))) {
+				this.fail(request.message);
+				return;
+			}
+			if (request.method === "notify" && typeof request.message === "string" && this.expectedProtocolAck && request.message.startsWith(protocolAck(this.token, ""))) {
+				this.childProtocolVersion = request.message.slice(protocolAck(this.token, "").length);
+				return;
+			}
 			if (request.method === "notify" && this.expectedPolicyAck && request.message === this.expectedPolicyAck) {
 				this.policyAcknowledged = true;
 				return;
@@ -1000,11 +1044,12 @@ export class SubagentManager {
 			const policyRequest = parseGuidanceRequest(request.placeholder);
 			const ctx = run.currentContext();
 			try {
-				if (!policyRequest || !ctx || ctx.signal?.aborted || !this.onGuidanceRequest) throw new Error("Session guidance is unavailable");
+				if (ctx?.signal?.aborted) throw new GuidanceError("REQUEST_CANCELLED", "Session guidance request cancelled");
+				if (!policyRequest || !ctx || !this.onGuidanceRequest) throw new GuidanceError("GUIDANCE_UNAVAILABLE", "Session guidance is unavailable");
 				const policy = await this.onGuidanceRequest(policyRequest, ctx);
-				run.sendUiResponse({ type: "extension_ui_response", id: request.id, value: JSON.stringify(policy) });
-			} catch {
-				run.sendUiResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+				run.sendUiResponse({ type: "extension_ui_response", id: request.id, value: JSON.stringify({ ok: true, guidance: policy }) });
+			} catch (error) {
+				run.sendUiResponse({ type: "extension_ui_response", id: request.id, value: JSON.stringify(guidanceFailure(error)) });
 			}
 			return;
 		}

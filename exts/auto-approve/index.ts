@@ -75,7 +75,7 @@ import { ensureSmallModel, loadSmallModel } from "../shared/small-model.ts";
 import {
 	APPROVAL_DIALOG_CHANNEL, APPROVAL_GUIDANCE_CHANNEL, type ApprovalDialogRequest,
 	type ApprovalGuidance, type GuidanceRequest,
-	guidanceTitle, isApprovalGuidance, parseGuidanceRequest,
+	guidanceTitle, isApprovalGuidance, parseGuidanceRequest, decodeGuidanceResponse, GuidanceError, isGuidanceError,
 } from "../shared/approval-guidance.ts";
 
 const WRITE_TOOLS = new Set(["write", "edit"]);
@@ -158,19 +158,27 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	}
 
 	async function exchangeGuidance(request: GuidanceRequest, ctx: ExtensionContext): Promise<ApprovalGuidance> {
-		if (ctx.signal?.aborted) throw new Error("Session guidance request cancelled");
+		if (ctx.signal?.aborted) throw new GuidanceError("REQUEST_CANCELLED", "Session guidance request cancelled");
 		if (childToken) {
 			// Managed children route this exact token-marked request to their parent, not the user.
 			const response = await ctx.ui.input(guidanceTitle(childToken), JSON.stringify(request), {
 				signal: ctx.signal, timeout: 10000,
 			});
-			const value: unknown = JSON.parse(response ?? "null");
-			if (!isApprovalGuidance(value)) throw new Error("Parent session guidance is unavailable or changed while editing");
+			let value: ApprovalGuidance;
+			try {
+				value = decodeGuidanceResponse(response);
+			} catch (error) {
+				if (isGuidanceError(error) && error.code === "PROTOCOL_MISMATCH") {
+					ctx.ui.notify(`Subagent protocol failure: ${error.message}`, "error");
+					ctx.shutdown();
+				}
+				throw error;
+			}
 			adoptGuidance(value, ctx);
 			return { ...value };
 		}
 		if (request.action === "set") {
-			if (request.expectedRevision !== guidance.revision) throw new Error("Session guidance changed while editing; reopen the editor");
+			if (request.expectedRevision !== guidance.revision) throw new GuidanceError("GUIDANCE_REVISION_CONFLICT", "Session guidance changed while editing; reopen the editor");
 			const next = { text: request.text, revision: guidance.revision + 1 };
 			pi.appendEntry(GUIDANCE_ENTRY, next);
 			adoptGuidance(next, ctx);

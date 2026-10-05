@@ -1,6 +1,18 @@
 export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_TOKEN_ENV = "PI_SUBAGENT_TOKEN";
 export const SUBAGENT_TASK_COMMAND = "_subagent-task";
+// Bump for incompatible wire-format or approval-policy changes, not releases.
+export const SUBAGENT_PROTOCOL_VERSION = 1;
+export const SUBAGENT_PROTOCOL_ENV = "PI_SUBAGENT_PROTOCOL_VERSION";
+export const SUBAGENT_HANDSHAKE_COMMAND = "_subagent-handshake";
+
+export function protocolMismatch(parent: string | undefined, child: string | undefined): string {
+	return `Subagent protocol mismatch: parent=${parent ?? "legacy"}, child=${child ?? "legacy"}. Run /reload in the parent session, then restart the subagent.`;
+}
+
+export function protocolAck(token: string, version: string): string {
+	return `[[pi-subagent-protocol:${token}]]${version}`;
+}
 export const AUTO_APPROVE_TASK_CHANNEL = "auto-approve:subagent-task";
 export const AUTO_APPROVE_STATE_CHANNEL = "auto-approve:get-state";
 export const AUTO_APPROVE_STAT_CHANNEL = "auto-approve:record-stat";

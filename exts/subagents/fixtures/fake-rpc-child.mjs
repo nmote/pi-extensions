@@ -66,7 +66,7 @@ function processLine(line) {
 		return;
 	}
 	if (command.type === "get_commands") {
-		const respond = () => send({ id: command.id, type: "response", command: "get_commands", success: true, data: { commands: [{ name: "_subagent-task" }] } });
+		const respond = () => send({ id: command.id, type: "response", command: "get_commands", success: true, data: { commands: [{ name: "_subagent-task" }, ...(process.env.FAKE_PROTOCOL === "legacy" ? [] : [{ name: "_subagent-handshake" }])] } });
 		if (slowDiscovery) {
 			send({ type: "extension_ui_request", id: "discovery-pause", method: "notify", message: "discovering task policy" });
 			setTimeout(respond, 25);
@@ -74,6 +74,13 @@ function processLine(line) {
 		return;
 	}
 	if (command.type === "prompt") {
+		if (command.message.startsWith("/_subagent-handshake ")) {
+			const version = process.env.FAKE_PROTOCOL ?? "1";
+			if (process.env.PI_SUBAGENT_PROTOCOL_VERSION !== "1") throw new Error("Parent protocol environment missing");
+			if (version !== "no-ack") send({ type: "extension_ui_request", id: "protocol-ack", method: "notify", message: `[[pi-subagent-protocol:${token}]]${version}` });
+			send({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "handled" } });
+			return;
+		}
 		if (command.message.startsWith("/_subagent-task ")) {
 			const [, suppliedToken, requestedMode] = command.message.split(" ");
 			const respond = () => {
@@ -218,6 +225,11 @@ function processLine(line) {
 	}
 	if (command.type === "extension_ui_response") {
 		if (command.id.startsWith("guidance-")) {
+			if (command.value?.startsWith("{")) {
+				const response = JSON.parse(command.value);
+				if (response.ok === true) command.value = JSON.stringify(response.guidance);
+				else if (response.ok === false) command.value = response.code;
+			}
 			if (guidanceDialog) {
 				if (command.id === "guidance-approval" && command.value?.startsWith("{")) {
 					send({ type: "extension_ui_request", id: "guidance-commit", method: "input",
