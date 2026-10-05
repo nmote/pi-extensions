@@ -23,7 +23,7 @@ Configuration lives in `<agent-dir>/extensions/auto-approve.json`. First startup
 
 Imports concatenate permission lists; empty local lists do not clear imported entries. Local `defaultMode` overrides imports, evaluator fields merge individually, and deny rules always win. To customize bundled permissions, copy [defaults.json](defaults.json) into your own configuration and import that instead. The bundled policy allows most extension tools and a few other operations.
 
-Session-local tools and file access within cwd or configured roots are permitted by the base policy, excluding Git/Hg metadata; global skill reads are also permitted. Unmatched calls prompt in `manual`, use the selected small model in `auto`, and proceed in `yolo`.
+Session-local tools and file access within cwd or configured roots are permitted by the base policy, excluding Git/Hg metadata; global skill reads and the running Pi installation's bundled documentation and examples (README, docs, examples, CHANGELOG) are also permitted, read-only. Unmatched calls prompt in `manual`, use the selected small model in `auto`, and proceed in `yolo`.
 
 Choose an authenticated evaluator with [`/small-model`](../small-model/README.md); there is no default, and calls may incur costs. Evaluations cache verdicts and default to a 20-second timeout and `medium` reasoning effort. Failures never grant access; required prompts without a usable UI block execution.
 

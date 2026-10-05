@@ -11,6 +11,7 @@ import {
 	SUBAGENT_TASK_COMMAND,
 	taskPolicyAck,
 } from "../shared/subagent-protocol.ts";
+import { getDocsPath, getExamplesPath, getPackageDir, getReadmePath } from "@earendil-works/pi-coding-agent";
 import { saveEvaluatorEffort } from "./config.ts";
 import autoApprove from "./index.ts";
 import subagents from "../subagents/index.ts";
@@ -163,7 +164,15 @@ async function main(): Promise<void> {
 		const scope = scopeInstruction(
 			"/workspace",
 			["../configured-write"],
-			[join(temp, "skills"), "../configured-read", "/shared"],
+			[
+				join(temp, "skills"),
+				getReadmePath(),
+				getDocsPath(),
+				getExamplesPath(),
+				join(getPackageDir(), "CHANGELOG.md"),
+				"../configured-read",
+				"/shared",
+			],
 			homedir(),
 		);
 		const command = "dangerous-command";
@@ -232,6 +241,24 @@ async function main(): Promise<void> {
 			(await gate({ toolName: "read", input: { path: "/shared/file.ts" } }, ctx)) === undefined &&
 				evaluatorRequests.length === 0,
 		);
+		const installDocReads = [
+			join(getDocsPath(), "extensions.md"),
+			join(getExamplesPath(), "extensions/main.ts"),
+			getReadmePath(),
+			join(getPackageDir(), "CHANGELOG.md"),
+		];
+		const installDocResults = await Promise.all(
+			installDocReads.map((path) => gate({ toolName: "read", input: { path } }, ctx)),
+		);
+		check(
+			"reads of the running installation's docs/examples are approved without evaluation",
+			installDocResults.every((result) => result === undefined) && evaluatorRequests.length === 0,
+		);
+		check(
+			"@-prefixed absolute install-doc read is approved without evaluation",
+			(await gate({ toolName: "read", input: { path: `@${installDocReads[0]}` } }, ctx)) === undefined &&
+				evaluatorRequests.length === 0,
+		);
 		await gate({ toolName: "read", input: { path: "/shared/x/.git/config" } }, ctx);
 		check("read of .git within readRoots is evaluated", evaluatorRequests.length === 1);
 		check("gate brackets and clears evaluation status", statuses.at(-2)?.value === "[evaluating…]" && statuses.at(-1)?.value === undefined);
@@ -240,8 +267,24 @@ async function main(): Promise<void> {
 			"write within readRoots is evaluated with the path scope",
 			evaluatorRequests.length === 2 &&
 				!!evaluatorRequests[1]?.systemPrompt.includes(
-					`Read-only roots: ${join(temp, "skills")}, /configured-read, /shared.`,
+					`Read-only roots: ${join(temp, "skills")}, ${getReadmePath()}, ${getDocsPath()}, ${getExamplesPath()}, ${join(getPackageDir(), "CHANGELOG.md")}, /configured-read, /shared.`,
 				),
+		);
+		await gate({ toolName: "write", input: { path: join(getExamplesPath(), "new/x.ts"), content: "" } }, ctx);
+		check(
+			"write within the install docs is evaluated, not auto-approved",
+			evaluatorRequests.length === 3,
+		);
+		symlinkSync(getDocsPath(), join(temp, "docs-link"), "dir");
+		await gate({ toolName: "read", input: { path: join(temp, "docs-link", "extensions.md") } }, ctx);
+		check(
+			"read of install docs through a symlink outside the roots is evaluated",
+			evaluatorRequests.length === 4,
+		);
+		await gate({ toolName: "read", input: { path: join(temp, "extensions", "auto-approve.json") } }, ctx);
+		check(
+			"read within the agent dir outside skills/docs is evaluated",
+			evaluatorRequests.length === 5,
 		);
 		process.env[SUBAGENT_TOKEN_ENV] = "child-token";
 		const noticesBeforeChildStat = notices.length;
@@ -310,7 +353,7 @@ async function main(): Promise<void> {
 		const stats = notices.at(-1) ?? "";
 		check(
 			"stats report rejection, escalation, approval, and denial counts",
-			stats.includes("evaluator allows: 3") &&
+			stats.includes("evaluator allows: 6") &&
 				stats.includes("soft rejections: 6") &&
 				stats.includes("escalations: 5") &&
 				stats.includes("human approvals: 3") &&

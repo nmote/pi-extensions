@@ -10,10 +10,11 @@
  *              "review" rejects the call and offers explicit human escalation
  *   - yolo   : auto-approve (the deny list still blocks)
  *
- * Precedence (all modes): deny list > global skill read / in-scope file access
- * > allow list > mode. Matching context rules only supplement model evaluation;
- * they never override allow or deny decisions. Session guidance supersedes
- * conflicting evaluator policy within its scope and is shared with subagents.
+ * Precedence (all modes): deny list > global skill read / installed-doc read /
+ * in-scope file access > allow list > mode. Matching context rules only
+ * supplement model evaluation; they never override allow or deny decisions.
+ * Session guidance supersedes conflicting evaluator policy within its scope
+ * and is shared with subagents.
  * The deny list always wins, including in yolo.
  *
  * Fail-closed: in non-interactive contexts (no UI), anything that would prompt
@@ -30,8 +31,16 @@
 import { AUTO_APPROVE_STATUS_KEY, AUTO_APPROVE_EVAL_STATUS_KEY } from "../shared/footer-status.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { join, resolve } from "node:path";
+import {
+	getAgentDir,
+	getDocsPath,
+	getExamplesPath,
+	getPackageDir,
+	getReadmePath,
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { EVALUATOR_CACHE_ENTRY, EvaluatorCache } from "./cache.ts";
@@ -120,6 +129,13 @@ function modeLabel(mode: Mode): string {
 export default function autoApprove(pi: ExtensionAPI): void {
 	const agentDir = getAgentDir();
 	const skillsDir = resolve(agentDir, "skills");
+	// Resolved from the running installation, so release updates apply on restart.
+	const installDocRoots = [
+		getReadmePath(),
+		getDocsPath(),
+		getExamplesPath(),
+		join(getPackageDir(), "CHANGELOG.md"),
+	];
 	const homeDir = homedir();
 	const childToken = process.env[SUBAGENT_TOKEN_ENV];
 	let config: AutoApproveConfig = loadConfig();
@@ -338,8 +354,14 @@ export default function autoApprove(pi: ExtensionAPI): void {
 
 	/** Trusted evaluator instructions: the path scope, matching context rules, then any symlink note. */
 	function evaluatorInstructions(input: MatchInput, cwd: string): string[] {
-		// The skills dir is read-only here so bash can inspect what the read tool may.
-		const scope = scopeInstruction(cwd, config.writeRoots, [skillsDir, ...config.readRoots], homeDir);
+		// The skills and installed-doc roots are read-only here so bash can inspect
+		// what the read tool may.
+		const scope = scopeInstruction(
+			cwd,
+			config.writeRoots,
+			[skillsDir, ...installDocRoots, ...config.readRoots],
+			homeDir,
+		);
 		const note = symlinkNote(input, cwd);
 		return [
 			...(scope ? [scope] : []),
@@ -548,10 +570,19 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			// Relative configured roots resolve against the tool event's cwd.
 			const inWriteScope = isPathWithinRoots(path, ctx.cwd, config.writeRoots, ctx.cwd, homeDir, realPathOf);
 
-			// Reads within cwd, the write scope, or readRoots are auto-approved.
+			// Reads within cwd, the write scope, readRoots, or the running
+			// installation's docs/examples are auto-approved.
 			if (
 				toolName === "read" &&
-				(inWriteScope || isPathWithinRoots(path, ctx.cwd, config.readRoots, ctx.cwd, homeDir, realPathOf))
+				(inWriteScope ||
+					isPathWithinRoots(
+						path,
+						ctx.cwd,
+						[...config.readRoots, ...installDocRoots],
+						ctx.cwd,
+						homeDir,
+						realPathOf,
+					))
 			) {
 				return undefined;
 			}
@@ -641,7 +672,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 						? `${small.provider}/${small.model}`
 						: "(not set — pick one with /small-model)";
 				ctx.ui.notify(
-					`Auto-approve\n  mode: ${modeLabel(mode)}\n  small model: ${evalModel}\n  evaluator effort: ${config.evaluator.reasoningEffort}\n  allow: ${config.allow.length} rule(s), deny: ${config.deny.length} rule(s), context: ${config.context.length} rule(s)\n  writeRoots: ${["<cwd>", ...config.writeRoots].join(", ")}\n  readRoots: ${["<cwd>", "<writeRoots>", skillsDir, ...config.readRoots].join(", ")}`,
+					`Auto-approve\n  mode: ${modeLabel(mode)}\n  small model: ${evalModel}\n  evaluator effort: ${config.evaluator.reasoningEffort}\n  allow: ${config.allow.length} rule(s), deny: ${config.deny.length} rule(s), context: ${config.context.length} rule(s)\n  writeRoots: ${["<cwd>", ...config.writeRoots].join(", ")}\n  readRoots: ${["<cwd>", "<writeRoots>", skillsDir, ...installDocRoots, ...config.readRoots].join(", ")}`,
 					"info",
 				);
 				return;
