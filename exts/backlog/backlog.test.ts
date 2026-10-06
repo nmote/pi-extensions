@@ -179,6 +179,7 @@ async function main(): Promise<void> {
 			context,
 		);
 		const [adviceBuild, adviceTest, adviceDocument] = adviceChildren.map(addedId);
+		const startedAdvice = `Review parent ${advicePlan} [open] Release: a child is approved, in_progress, or done. Consider marking the parent in_progress.`;
 		const firstCompletion = await runBacklogOperations(advice, [{ action: "update", id: adviceBuild, status: "done" }], context);
 		const finalCompletions = await runBacklogOperations(
 			advice,
@@ -191,13 +192,65 @@ async function main(): Promise<void> {
 		const advisory = `Review parent ${advicePlan} [open] Release: all children are done or dropped. Check its Done criteria and any remaining parent-level work before marking it done.`;
 		check(
 			"an all-terminal child set produces one advisory for an active parent",
-			firstCompletion.length === 1 && finalCompletions.filter((line) => line === advisory).length === 1,
+			finalCompletions.length === 3 && finalCompletions.filter((line) => line === advisory).length === 1,
+		);
+		check(
+			"a done child nudges an open parent toward in_progress when siblings remain unfinished",
+			firstCompletion.length === 2 && firstCompletion[1] === startedAdvice,
 		);
 		await runBacklogOperations(advice, [{ action: "update", id: advicePlan, status: "done" }], context);
 		check(
 			"terminal parents do not produce advisories",
 			(await runBacklogOperations(advice, [{ action: "add", title: "Late task", parent: advicePlan, status: "done" }], context))
 				.length === 1,
+		);
+
+		await runBacklogOperations(advice, [{ action: "update", id: advicePlan, status: "open" }], context);
+		const startedResults = await runBacklogOperations(
+			advice,
+			[
+				{ action: "update", id: adviceBuild, status: "approved" },
+				{ action: "add", title: "Publish", parent: advicePlan, status: "in_progress" },
+			],
+			context,
+		);
+		check(
+			"approved and in_progress children produce one nudge without changing the open parent",
+			startedResults.filter((line) => line === startedAdvice).length === 1 &&
+				parseItem(advicePlan, readFileSync(advice.itemPath(advicePlan), "utf8")).status === "open",
+		);
+		for (const status of ["approved", "in_progress", "done", "dropped"] as const) {
+			const results = await runBacklogOperations(
+				advice,
+				[
+					{ action: "update", id: adviceBuild, status: "in_progress" },
+					{ action: "update", id: advicePlan, status },
+				],
+				context,
+			);
+			check(`a parent set to ${status} in the same batch gets no start nudge`, results.length === 2);
+		}
+		const reversedStart = await runBacklogOperations(
+			advice,
+			[
+				{ action: "update", id: advicePlan, status: "open" },
+				{ action: "update", id: adviceBuild, status: "approved" },
+				{ action: "update", id: adviceBuild, status: "open" },
+			],
+			context,
+		);
+		check("a child reverted to open in the same batch gets no start nudge", reversedStart.length === 3);
+
+		const completedPlan = addedId((await runBacklogOperations(advice, [{ action: "add", title: "Completed plan" }], context))[0]);
+		const completedChild = await runBacklogOperations(
+			advice,
+			[{ action: "add", title: "Only task", parent: completedPlan, status: "done" }],
+			context,
+		);
+		check(
+			"an all-done child set produces only the completion nudge",
+			completedChild.length === 2 && completedChild[1] ===
+				`Review parent ${completedPlan} [open] Completed plan: all children are done or dropped. Check its Done criteria and any remaining parent-level work before marking it done.`,
 		);
 
 		const deps = new BacklogStore(join(root, "deps"));

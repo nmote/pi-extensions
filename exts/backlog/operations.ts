@@ -311,6 +311,7 @@ export async function runBacklogOperations(
 		const now = timestamp(context.now);
 		const lines: string[] = [];
 		const terminalTransitions = new Set<string>();
+		const startedChildren = new Set<string>();
 
 		const existing = (id: string) => {
 			const error = snapshot.errors.get(id);
@@ -380,6 +381,7 @@ export async function runBacklogOperations(
 					if (operation.dependsOn !== undefined) setDependsOn(item, operation.dependsOn as string[]);
 					if (item.status === "approved") logApproval(item);
 					if (isTerminal(item)) terminalTransitions.add(id);
+					if (item.status === "approved" || item.status === "in_progress" || item.status === "done") startedChildren.add(id);
 					lines.push(`added ${id} (revision ${save(item)})`);
 					break;
 				}
@@ -401,6 +403,7 @@ export async function runBacklogOperations(
 					if (operation.dependsOn !== undefined) setDependsOn(item, operation.dependsOn as string[]);
 					if (stored.item.status !== "approved" && item.status === "approved") logApproval(item);
 					if (!isTerminal(stored.item) && isTerminal(item)) terminalTransitions.add(item.id);
+					if (operation.status === "approved" || operation.status === "in_progress" || operation.status === "done") startedChildren.add(item.id);
 					lines.push(`updated ${item.id} (revision ${save(item)})`);
 					if (unapproved) {
 						lines.push(
@@ -436,18 +439,35 @@ export async function runBacklogOperations(
 			}
 		}
 
+		const startedParents = new Set(
+			[...startedChildren]
+				.map((id) => snapshot.items.get(id)?.item)
+				.filter((item) => item?.status === "approved" || item?.status === "in_progress" || item?.status === "done")
+				.map((item) => item?.parent)
+				.filter((id): id is string => id !== undefined),
+		);
 		const parents = new Set(
 			[...terminalTransitions]
 				.map((id) => snapshot.items.get(id)?.item.parent)
 				.filter((id): id is string => id !== undefined),
 		);
+		const completionParents = new Set<string>();
 		for (const id of parents) {
 			const parent = snapshot.items.get(id)?.item;
 			if (!parent || !ACTIVE_STATUSES.includes(parent.status)) continue;
 			const children = childrenOf(snapshot, id);
 			if (!children.length || !children.every(isTerminal)) continue;
+			completionParents.add(id);
 			lines.push(
 				`Review parent ${parent.id} [${parent.status}] ${parent.title}: all children are done or dropped. Check its Done criteria and any remaining parent-level work before marking it done.`,
+			);
+		}
+
+		for (const id of startedParents) {
+			const parent = snapshot.items.get(id)?.item;
+			if (parent?.status !== "open" || completionParents.has(id)) continue;
+			lines.push(
+				`Review parent ${parent.id} [open] ${parent.title}: a child is approved, in_progress, or done. Consider marking the parent in_progress.`,
 			);
 		}
 
