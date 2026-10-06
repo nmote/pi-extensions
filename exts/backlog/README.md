@@ -11,6 +11,8 @@ Tracks repository-labeled work across sessions, with parent/child plans, depende
 
 - `backlog` — List, read, add, update, append to, or delete items in atomic batches of up to 20 operations. Supports repository/status/text filters, parent links, dependencies, and revision-checked updates; `approved` requires your explicit approval of the current plan.
 
+Setting a child to `approved`, `in_progress`, or `done` automatically moves every `open` ancestor to `in_progress` and logs the triggering descendant. Other ancestor statuses are preserved. This tracks progress without approving additional work. Parent completion remains manual; the tool prompts a Done-criteria check when all children are `done` or `dropped`.
+
 ## Storage and graphs
 
 Items live under `<agent-dir>/backlog` by default; `PI_BACKLOG_DIR` overrides it. `<agent-dir>` defaults to `~/.pi/agent`, or `PI_CODING_AGENT_DIR`.

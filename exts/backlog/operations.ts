@@ -439,35 +439,43 @@ export async function runBacklogOperations(
 			}
 		}
 
-		const startedParents = new Set(
-			[...startedChildren]
-				.map((id) => snapshot.items.get(id)?.item)
-				.filter((item) => item?.status === "approved" || item?.status === "in_progress" || item?.status === "done")
-				.map((item) => item?.parent)
-				.filter((id): id is string => id !== undefined),
-		);
+		for (const id of startedChildren) {
+			const child = snapshot.items.get(id)?.item;
+			if (!child || !["approved", "in_progress", "done"].includes(child.status)) continue;
+			const seen = new Set([child.id]);
+			let parentId = child.parent;
+			while (parentId) {
+				assert(!seen.has(parentId), `parent cycle involving backlog item ${parentId}`);
+				seen.add(parentId);
+				const parent = snapshot.items.get(parentId)?.item;
+				if (!parent) break;
+				parentId = parent.parent;
+				if (parent.status !== "open") continue;
+				const body = appendLog(
+					parent.body,
+					`Marked in_progress because descendant ${child.id} is ${child.status}. This tracks progress, not approval; it does not authorize the parent’s plan or other children.`,
+					now,
+					context.sessionId,
+				);
+				assert(bytes(body) <= MAX_BODY_BYTES, `backlog item body would exceed ${MAX_BODY_BYTES} bytes`);
+				const revision = save({ ...parent, status: "in_progress", body, updated: now });
+				lines.push(
+					`Marked parent ${parent.id} in_progress to reflect descendant ${child.id} progress (revision ${revision}). This does not approve or authorize additional work.`,
+				);
+			}
+		}
 		const parents = new Set(
 			[...terminalTransitions]
 				.map((id) => snapshot.items.get(id)?.item.parent)
 				.filter((id): id is string => id !== undefined),
 		);
-		const completionParents = new Set<string>();
 		for (const id of parents) {
 			const parent = snapshot.items.get(id)?.item;
 			if (!parent || !ACTIVE_STATUSES.includes(parent.status)) continue;
 			const children = childrenOf(snapshot, id);
 			if (!children.length || !children.every(isTerminal)) continue;
-			completionParents.add(id);
 			lines.push(
 				`Parent ${parent.id} [${parent.status}] ${parent.title}: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`,
-			);
-		}
-
-		for (const id of startedParents) {
-			const parent = snapshot.items.get(id)?.item;
-			if (parent?.status !== "open" || completionParents.has(id)) continue;
-			lines.push(
-				`Parent ${parent.id} [open] ${parent.title}: a child is approved, in_progress, or done. Mark the parent in_progress unless there is a specific reason to leave it open; if so, record that reason. This tracks progress, not approval: it does not authorize the parent’s plan or other children.`,
 			);
 		}
 

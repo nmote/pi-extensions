@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runBacklogOperations, statusSummary, type OperationContext } from "./operations.ts";
+import { MAX_BODY_BYTES, runBacklogOperations, statusSummary, type OperationContext } from "./operations.ts";
 import { repoLabel } from "./repo.ts";
 import { BacklogStore, parseItem, referencedItems } from "./store.ts";
 
@@ -143,8 +143,8 @@ async function main(): Promise<void> {
 			parseItem(step1, readFileSync(tree.itemPath(step1), "utf8")).parent === planId &&
 				children ===
 					`backlog items for ~/repos/project (2):\n${step2} [in_progress] Step 2 · parent ${planId}\n${step1} [open] Step 1 · parent ${planId}` &&
-				readPlan?.endsWith(`children (2):\n  ${step2} [in_progress] Step 2\n  ${step1} [open] Step 1`) === true &&
-				readStep?.includes(`parent: ${planId} [open] Plan`) === true,
+				readPlan?.includes(`children (2):\n  ${step2} [in_progress] Step 2\n  ${step1} [open] Step 1`) === true &&
+				readStep?.includes(`parent: ${planId} [in_progress] Plan`) === true,
 		);
 		check(
 			"missing, self, and cyclic parents are rejected",
@@ -179,7 +179,6 @@ async function main(): Promise<void> {
 			context,
 		);
 		const [adviceBuild, adviceTest, adviceDocument] = adviceChildren.map(addedId);
-		const startedAdvice = `Parent ${advicePlan} [open] Release: a child is approved, in_progress, or done. Mark the parent in_progress unless there is a specific reason to leave it open; if so, record that reason. This tracks progress, not approval: it does not authorize the parent’s plan or other children.`;
 		const firstCompletion = await runBacklogOperations(advice, [{ action: "update", id: adviceBuild, status: "done" }], context);
 		const finalCompletions = await runBacklogOperations(
 			advice,
@@ -189,14 +188,16 @@ async function main(): Promise<void> {
 			],
 			context,
 		);
-		const advisory = `Parent ${advicePlan} [open] Release: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`;
+		const advisory = `Parent ${advicePlan} [in_progress] Release: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`;
 		check(
 			"an all-terminal child set produces one advisory for an active parent",
 			finalCompletions.length === 3 && finalCompletions.filter((line) => line === advisory).length === 1,
 		);
 		check(
-			"a done child nudges an open parent toward in_progress when siblings remain unfinished",
-			firstCompletion.length === 2 && firstCompletion[1] === startedAdvice,
+			"a done child starts its open parent and records the trigger",
+			firstCompletion.length === 2 && firstCompletion[1].startsWith(`Marked parent ${advicePlan} in_progress`) &&
+				parseItem(advicePlan, readFileSync(advice.itemPath(advicePlan), "utf8")).status === "in_progress" &&
+				parseItem(advicePlan, readFileSync(advice.itemPath(advicePlan), "utf8")).body.includes(`descendant ${adviceBuild} is done`),
 		);
 		await runBacklogOperations(advice, [{ action: "update", id: advicePlan, status: "done" }], context);
 		check(
@@ -215,9 +216,9 @@ async function main(): Promise<void> {
 			context,
 		);
 		check(
-			"approved and in_progress children produce one nudge without changing the open parent",
-			startedResults.filter((line) => line === startedAdvice).length === 1 &&
-				parseItem(advicePlan, readFileSync(advice.itemPath(advicePlan), "utf8")).status === "open",
+			"approved and in_progress children start their open parent only once per batch",
+			startedResults.filter((line) => line.startsWith(`Marked parent ${advicePlan} in_progress`)).length === 1 &&
+				parseItem(advicePlan, readFileSync(advice.itemPath(advicePlan), "utf8")).status === "in_progress",
 		);
 		for (const status of ["approved", "in_progress", "done", "dropped"] as const) {
 			const results = await runBacklogOperations(
@@ -228,7 +229,8 @@ async function main(): Promise<void> {
 				],
 				context,
 			);
-			check(`a parent set to ${status} in the same batch gets no start nudge`, results.length === 2);
+			check(`a parent set to ${status} in the same batch is not automatically changed`,
+				results.length === 2 && parseItem(advicePlan, readFileSync(advice.itemPath(advicePlan), "utf8")).status === status);
 		}
 		const reversedStart = await runBacklogOperations(
 			advice,
@@ -239,7 +241,8 @@ async function main(): Promise<void> {
 			],
 			context,
 		);
-		check("a child reverted to open in the same batch gets no start nudge", reversedStart.length === 3);
+		check("a child reverted to open in the same batch does not start its parent", reversedStart.length === 3 &&
+			parseItem(advicePlan, readFileSync(advice.itemPath(advicePlan), "utf8")).status === "open");
 
 		const completedPlan = addedId((await runBacklogOperations(advice, [{ action: "add", title: "Completed plan" }], context))[0]);
 		const completedChild = await runBacklogOperations(
@@ -248,10 +251,62 @@ async function main(): Promise<void> {
 			context,
 		);
 		check(
-			"an all-done child set produces only the completion nudge",
-			completedChild.length === 2 && completedChild[1] ===
-				`Parent ${completedPlan} [open] Completed plan: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`,
+			"an all-done child set starts its parent but leaves completion manual",
+			completedChild.length === 3 && completedChild[2] ===
+				`Parent ${completedPlan} [in_progress] Completed plan: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`,
 		);
+
+		const progressPlan = addedId((await runBacklogOperations(advice, [{ action: "add", title: "Progress plan" }], context))[0]);
+		const progressResults = await runBacklogOperations(
+			advice,
+			[{ action: "add", title: "Working task", parent: progressPlan, status: "in_progress" }],
+			{ ...context, subagent: true },
+		);
+		const progressParent = parseItem(progressPlan, readFileSync(advice.itemPath(progressPlan), "utf8"));
+		check(
+			"a subagent's in_progress child starts its parent without granting approval",
+			progressResults.length === 2 && progressParent.status === "in_progress" &&
+				progressParent.body.includes(`descendant ${addedId(progressResults[0])} is in_progress`) &&
+				!progressParent.body.includes("Marked approved."),
+		);
+		const fullPlan = addedId((await runBacklogOperations(advice,
+			[{ action: "add", title: "Full log", body: "x".repeat(MAX_BODY_BYTES) }], context))[0]);
+		const beforeFailure = readdirSync(advice.dir).sort().join();
+		check(
+			"an automatic parent log failure rolls back the entire batch",
+			await rejects(runBacklogOperations(advice,
+				[{ action: "add", title: "Working task", parent: fullPlan, status: "in_progress" }], context), /body would exceed/) &&
+				readdirSync(advice.dir).sort().join() === beforeFailure &&
+				parseItem(fullPlan, readFileSync(advice.itemPath(fullPlan), "utf8")).status === "open",
+		);
+
+		const ancestors = new BacklogStore(join(root, "ancestors"));
+		for (const middleStatus of ["open", "approved", "in_progress", "done", "dropped"] as const) {
+			const top = addedId((await runBacklogOperations(ancestors, [{ action: "add", title: "Top" }], context))[0]);
+			const middle = addedId((await runBacklogOperations(ancestors,
+				[{ action: "add", title: "Middle", parent: top, status: middleStatus }], context))[0]);
+			await runBacklogOperations(ancestors, [{ action: "update", id: top, status: "open" }], context);
+			const results = await runBacklogOperations(ancestors,
+				[{ action: "add", title: "Leaf", parent: middle, status: "in_progress" }], context);
+			const leaf = addedId(results[0]);
+			const topItem = parseItem(top, readFileSync(ancestors.itemPath(top), "utf8"));
+			const middleItem = parseItem(middle, readFileSync(ancestors.itemPath(middle), "utf8"));
+			check(`progress propagates through an ancestor with status ${middleStatus} without changing non-open statuses`,
+				topItem.status === "in_progress" && topItem.body.includes(`descendant ${leaf} is in_progress`) &&
+					middleItem.status === (middleStatus === "open" ? "in_progress" : middleStatus) &&
+					results.length === (middleStatus === "open" ? 3 : 2));
+		}
+		const blockedTop = addedId((await runBacklogOperations(ancestors,
+			[{ action: "add", title: "Full ancestor", body: "x".repeat(MAX_BODY_BYTES) }], context))[0]);
+		const blockedMiddle = addedId((await runBacklogOperations(ancestors,
+			[{ action: "add", title: "Middle", parent: blockedTop }], context))[0]);
+		const ancestorFiles = readdirSync(ancestors.dir).sort().join();
+		check("an ancestor log failure rolls back child creation and all ancestor changes",
+			await rejects(runBacklogOperations(ancestors,
+				[{ action: "add", title: "Leaf", parent: blockedMiddle, status: "in_progress" }], context), /body would exceed/) &&
+				parseItem(blockedMiddle, readFileSync(ancestors.itemPath(blockedMiddle), "utf8")).status === "open" &&
+				parseItem(blockedTop, readFileSync(ancestors.itemPath(blockedTop), "utf8")).status === "open" &&
+				readdirSync(ancestors.dir).sort().join() === ancestorFiles);
 
 		const deps = new BacklogStore(join(root, "deps"));
 		const design = addedId((await runBacklogOperations(deps, [{ action: "add", title: "Design" }], context))[0]);
