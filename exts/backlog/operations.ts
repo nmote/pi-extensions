@@ -459,7 +459,7 @@ export async function runBacklogOperations(
 			if (!children.length || !children.every(isTerminal)) continue;
 			completionParents.add(id);
 			lines.push(
-				`Review parent ${parent.id} [${parent.status}] ${parent.title}: all children are done or dropped. Check its Done criteria and any remaining parent-level work before marking it done.`,
+				`Parent ${parent.id} [${parent.status}] ${parent.title}: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`,
 			);
 		}
 
@@ -467,7 +467,7 @@ export async function runBacklogOperations(
 			const parent = snapshot.items.get(id)?.item;
 			if (parent?.status !== "open" || completionParents.has(id)) continue;
 			lines.push(
-				`Review parent ${parent.id} [open] ${parent.title}: a child is approved, in_progress, or done. Consider marking the parent in_progress.`,
+				`Parent ${parent.id} [open] ${parent.title}: a child is approved, in_progress, or done. Mark the parent in_progress unless there is a specific reason to leave it open; if so, record that reason. This tracks progress, not approval: it does not authorize the parent’s plan or other children.`,
 			);
 		}
 

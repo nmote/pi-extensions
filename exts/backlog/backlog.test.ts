@@ -179,7 +179,7 @@ async function main(): Promise<void> {
 			context,
 		);
 		const [adviceBuild, adviceTest, adviceDocument] = adviceChildren.map(addedId);
-		const startedAdvice = `Review parent ${advicePlan} [open] Release: a child is approved, in_progress, or done. Consider marking the parent in_progress.`;
+		const startedAdvice = `Parent ${advicePlan} [open] Release: a child is approved, in_progress, or done. Mark the parent in_progress unless there is a specific reason to leave it open; if so, record that reason. This tracks progress, not approval: it does not authorize the parent’s plan or other children.`;
 		const firstCompletion = await runBacklogOperations(advice, [{ action: "update", id: adviceBuild, status: "done" }], context);
 		const finalCompletions = await runBacklogOperations(
 			advice,
@@ -189,7 +189,7 @@ async function main(): Promise<void> {
 			],
 			context,
 		);
-		const advisory = `Review parent ${advicePlan} [open] Release: all children are done or dropped. Check its Done criteria and any remaining parent-level work before marking it done.`;
+		const advisory = `Parent ${advicePlan} [open] Release: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`;
 		check(
 			"an all-terminal child set produces one advisory for an active parent",
 			finalCompletions.length === 3 && finalCompletions.filter((line) => line === advisory).length === 1,
@@ -250,7 +250,7 @@ async function main(): Promise<void> {
 		check(
 			"an all-done child set produces only the completion nudge",
 			completedChild.length === 2 && completedChild[1] ===
-				`Review parent ${completedPlan} [open] Completed plan: all children are done or dropped. Check its Done criteria and any remaining parent-level work before marking it done.`,
+				`Parent ${completedPlan} [open] Completed plan: all children are done or dropped. Read the parent and check its Done criteria and remaining parent-level work. Mark it done if complete; otherwise record what remains and set its status to reflect that work.`,
 		);
 
 		const deps = new BacklogStore(join(root, "deps"));
