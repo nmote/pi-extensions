@@ -58,6 +58,8 @@ import {
 } from "./status.ts";
 
 const MAX_PARALLEL_TASKS = 8;
+const SUPERVISOR_REPLIED_ENTRY = "subagent-supervisor-replied";
+const REPLIED_PHASE = "supervisor replied; continued in subagent_reply";
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 const TaskFields = {
@@ -132,39 +134,43 @@ function formatResults(results: SubagentSnapshot[]): string {
 	return results.map(formatResult).join("\n\n---\n\n");
 }
 
-function formatExpandedResult(result: SubagentSnapshot): string {
-	const metadata = formatExpandedMetadata(result);
+function formatExpandedResult(result: SubagentSnapshot, replied = false): string {
+	const metadata = formatExpandedMetadata(replied ? { ...result, phase: REPLIED_PHASE, taskEndedAt: result.updatedAt } : result);
 	const activity = formatActivity(result) || "(no activity yet)";
 	let outcome = "";
-	if (result.status === "waiting") outcome = `${questionText(result)}\n\nUse subagent_reply with id ${result.id} after deciding the answer.`;
+	if (result.status === "waiting") outcome = `${questionText(result)}\n\n${replied ? REPLIED_PHASE : `Use subagent_reply with id ${result.id} after deciding the answer.`}`;
 	else if (result.status === "idle" || result.status === "completed") outcome = `#### Output\n\n${truncateOutput(result.output || "(no output)")}`;
 	else if (result.error) outcome = `#### Error\n\n${result.error}`;
-	return `### ${result.agent} (${result.id}) — ${result.status}\n\n${metadata}\n\n#### Recent activity\n\n\`\`\`text\n${activity}\n\`\`\`${outcome ? `\n\n${outcome}` : ""}`;
+	return `### ${result.agent} (${result.id}) — ${replied ? "supervisor replied" : result.status}\n\n${metadata}\n\n#### Recent activity\n\n\`\`\`text\n${activity}\n\`\`\`${outcome ? `\n\n${outcome}` : ""}`;
 }
 
-function formatExpandedResults(results: SubagentSnapshot[]): string {
+function formatExpandedResults(results: SubagentSnapshot[], replied: ReadonlySet<string>): string {
 	if (results.length === 0) return "No subagents.";
-	return results.map(formatExpandedResult).join("\n\n---\n\n");
+	return results.map((item) => formatExpandedResult(item, replied.has(item.id))).join("\n\n---\n\n");
 }
 
 function renderSubagentResult(
 	result: AgentToolResult<SubagentDetails>,
 	{ expanded }: ToolRenderResultOptions,
 	theme: Theme,
+	replied: ReadonlySet<string> = new Set(),
 ): Component {
 	const details = result.details;
 	if (!details) return new Text(result.content[0]?.type === "text" ? result.content[0].text : "", 0, 0);
 	if (!expanded) {
-		let text = details.results.map((item) => formatRunStatus(item)).join("\n");
-		if (details.results.some((item) => item.status === "waiting")) {
+		let text = details.results.map((item) => formatRunStatus(replied.has(item.id)
+			? { ...item, status: "idle", phase: REPLIED_PHASE, taskEndedAt: item.updatedAt }
+			: item)).join("\n");
+		if (details.results.some((item) => item.status === "waiting" && !replied.has(item.id))) {
 			text += `\n${theme.fg("warning", "Supervisor reply required")}`;
 		}
 		return new Text(text, 0, 0);
 	}
 	const container = new Container();
-	container.addChild(new Text(theme.fg("toolTitle", theme.bold(`subagents · ${progressText(details.results)}`)), 0, 0));
+	const progress = [progressText(details.results.filter((item) => !replied.has(item.id))), replied.size ? `${replied.size} supervisor replied` : ""].filter(Boolean).join(" · ");
+	container.addChild(new Text(theme.fg("toolTitle", theme.bold(`subagents · ${progress}`)), 0, 0));
 	container.addChild(new Spacer(1));
-	container.addChild(new Markdown(formatExpandedResults(details.results), 0, 0, getMarkdownTheme()));
+	container.addChild(new Markdown(formatExpandedResults(details.results, replied), 0, 0, getMarkdownTheme()));
 	return container;
 }
 
@@ -272,6 +278,44 @@ export default function subagents(pi: ExtensionAPI): void {
 	// Tool calls in one turn can run concurrently; the parent must see the catalog result first.
 	pi.on("turn_start", () => { catalogAvailable = catalogListed; });
 	let statusContext: ExtensionContext | undefined;
+	const waitingCalls = new Map<string, Set<string>>();
+	const repliedCalls = new Map<string, Set<string>>();
+	const renderInvalidators = new Map<string, () => void>();
+	function trackWaiting(toolCallId: string, results: SubagentSnapshot[]): void {
+		for (const result of results) {
+			if (result.status !== "waiting") continue;
+			const calls = waitingCalls.get(result.id) ?? new Set<string>();
+			calls.add(toolCallId);
+			waitingCalls.set(result.id, calls);
+		}
+	}
+	function markReplied(id: string): void {
+		const calls = waitingCalls.get(id);
+		if (!calls) return;
+		waitingCalls.delete(id);
+		for (const toolCallId of calls) {
+			const replied = repliedCalls.get(toolCallId) ?? new Set<string>();
+			replied.add(id);
+			repliedCalls.set(toolCallId, replied);
+			try {
+				pi.appendEntry(SUPERVISOR_REPLIED_ENTRY, { toolCallId, id });
+			} catch (error) {
+				const message = `Could not save supervisor reply display: ${error instanceof Error ? error.message : String(error)}`;
+				if (statusContext?.hasUI) statusContext.ui.notify(message, "error");
+				else console.error(message);
+			}
+			renderInvalidators.get(toolCallId)?.();
+		}
+	}
+	function renderResult(result: AgentToolResult<SubagentDetails>, options: ToolRenderResultOptions, theme: Theme, context: { toolCallId: string; invalidate: () => void }): Component {
+		const replied = repliedCalls.get(context.toolCallId);
+		if (!options.isPartial && result.details?.results.some((item) => item.status === "waiting" && !replied?.has(item.id))) {
+			renderInvalidators.set(context.toolCallId, context.invalidate);
+		} else {
+			renderInvalidators.delete(context.toolCallId);
+		}
+		return renderSubagentResult(result, options, theme, replied);
+	}
 	function refreshStatus(count: number): void {
 		if (!statusContext?.hasUI) return;
 		statusContext.ui.setStatus(SUBAGENTS_STATUS_KEY, count ? statusContext.ui.theme.fg("dim", `[subagents: ${count} live]`) : undefined);
@@ -295,7 +339,19 @@ export default function subagents(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		statusContext = ctx;
-		manager.restore(restoreSubagents(ctx.sessionManager.getBranch()));
+		waitingCalls.clear();
+		repliedCalls.clear();
+		renderInvalidators.clear();
+		const branch = ctx.sessionManager.getBranch();
+		for (const entry of branch) {
+			if (entry.type !== "custom" || entry.customType !== SUPERVISOR_REPLIED_ENTRY) continue;
+			const data = entry.data as { toolCallId?: unknown; id?: unknown } | undefined;
+			if (typeof data?.toolCallId !== "string" || typeof data.id !== "string") continue;
+			const replied = repliedCalls.get(data.toolCallId) ?? new Set<string>();
+			replied.add(data.id);
+			repliedCalls.set(data.toolCallId, replied);
+		}
+		manager.restore(restoreSubagents(branch));
 		refreshStatus(manager.liveCount());
 	});
 
@@ -365,6 +421,7 @@ export default function subagents(pi: ExtensionAPI): void {
 				} finally {
 					reporter.stop();
 				}
+				trackWaiting(_toolCallId, results);
 				return resultWithUsage("spawn", results, manager.consumeUsage(results.map((result) => result.id)));
 			},
 			renderCall(args, theme) {
@@ -378,7 +435,7 @@ export default function subagents(pi: ExtensionAPI): void {
 					0,
 				);
 			},
-			renderResult: renderSubagentResult,
+			renderResult,
 		});
 	}
 	registerSubagentTool(loadSubagentModels());
@@ -399,9 +456,10 @@ export default function subagents(pi: ExtensionAPI): void {
 			} finally {
 				reporter.stop();
 			}
+			trackWaiting(_toolCallId, [result]);
 			return resultWithUsage("continue", [result], manager.consumeUsage([result.id]));
 		},
-		renderResult: renderSubagentResult,
+		renderResult,
 	});
 
 	pi.registerTool({
@@ -417,13 +475,17 @@ export default function subagents(pi: ExtensionAPI): void {
 			const reporter = createProgressReporter(ctx.mode === "tui", "reply", onUpdate);
 			let result: SubagentSnapshot;
 			try {
-				result = await manager.reply(params.id, params.answer, ctx, reporter.publish, signal);
+				result = await manager.reply(params.id, params.answer, ctx, (results) => {
+					if (results.some((item) => item.status === "running")) markReplied(params.id);
+					reporter.publish(results);
+				}, signal);
 			} finally {
 				reporter.stop();
 			}
+			trackWaiting(_toolCallId, [result]);
 			return resultWithUsage("reply", [result], manager.consumeUsage([result.id]));
 		},
-		renderResult: renderSubagentResult,
+		renderResult,
 	});
 
 	pi.registerTool({

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } fr
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { initTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AutoApproveStat, SUBAGENT_RUN_ID_ENV, SUBAGENT_TOKEN_ENV, SUBAGENT_PROTOCOL_ENV, SUBAGENT_HANDSHAKE_COMMAND, protocolAck } from "../shared/subagent-protocol.ts";
 import {
 	discoverNamedAgents,
@@ -261,6 +261,37 @@ try {
 		check("a new runtime discovers an absent default directory", emptyCatalog.content[0]?.text === formatNamedAgentCatalog({ directory: join(agentDir, "agents"), agents: [], errors: [] }));
 		const emptyGeneral = await emptyRuntime.get("subagent").execute("general", { task: "done general" }, undefined, undefined, ctx);
 		check("general delegation needs no named definitions", emptyGeneral.details.results[0]?.agent === "general" && emptyGeneral.details.results[0]?.output === "done");
+
+		initTheme("dark", false);
+		const displayEntries: any[] = [];
+		const displayRuntime = register(displayEntries);
+		displayRuntime.beginSession(ctx as unknown as ExtensionContext);
+		const displaySpawn = displayRuntime.tools.get("subagent");
+		const displayReply = displayRuntime.tools.get("subagent_reply");
+		const waitingDisplay = await displaySpawn.execute("display-wait", { tasks: [{ task: "ask" }, { task: "ask" }] }, undefined, undefined, ctx);
+		const displayId = waitingDisplay.details.results[0].id;
+		const displayTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+		let invalidations = 0;
+		const renderContext = { toolCallId: "display-wait", invalidate: () => { invalidations++; } };
+		const renderDisplay = (tool = displaySpawn, result = waitingDisplay, context = renderContext, expanded = false) =>
+			tool.renderResult(result, { expanded, isPartial: false }, displayTheme, context).render(240).join("\n");
+		check("unanswered widget requests supervisor input", renderDisplay().includes("Supervisor reply required"));
+		await errorMessage(displayReply.execute("wrong", { id: "unknown", answer: "two" }, undefined, undefined, ctx));
+		check("rejected reply leaves the original widget waiting", invalidations === 0 && !renderDisplay().includes("supervisor replied;"));
+		let acceptedDisplay = "";
+		await displayReply.execute("display-reply", { id: displayId, answer: "two" }, undefined, () => { acceptedDisplay = renderDisplay(); }, ctx);
+		const displayed = renderDisplay();
+		check("accepted reply invalidates and updates the original widget", invalidations === 1 && acceptedDisplay.includes("supervisor replied; continued in subagent_reply"));
+		check("batch widget preserves usage and another unanswered question", displayed.includes("Supervisor reply required") && displayed.includes(`$${waitingDisplay.details.results[0].usage.cost.total.toFixed(3)}`) && displayed.includes("waiting for supervisor"));
+		const repeatedQuestion = await displayRuntime.tools.get("subagent_continue").execute("display-again", { id: displayId, task: "ask again" }, undefined, undefined, ctx);
+		check("a later question has its own waiting widget", renderDisplay(displayRuntime.tools.get("subagent_continue"), repeatedQuestion, { ...renderContext, toolCallId: "display-again" }).includes("Supervisor reply required") && renderDisplay().includes("supervisor replied;"));
+		await displayReply.execute("display-second-reply", { id: waitingDisplay.details.results[1].id, answer: "one" }, undefined, undefined, ctx);
+		check("fully answered widget removes the warning in both views", !renderDisplay().includes("Supervisor reply required") && !renderDisplay(displaySpawn, waitingDisplay, renderContext, true).includes("Use subagent_reply") && renderDisplay(displaySpawn, waitingDisplay, renderContext, true).includes("supervisor replied"));
+		check("display changes leave the tool result snapshot untouched", waitingDisplay.details.results.every((item: { status: string }) => item.status === "waiting") && waitingDisplay.content[0].text.includes("Use subagent_reply"));
+		await displayRuntime.shutdown();
+		const restoredDisplay = register(displayEntries);
+		restoredDisplay.beginSession(ctx as unknown as ExtensionContext);
+		check("answered widget survives runtime restoration", renderDisplay(restoredDisplay.tools.get("subagent")).includes("supervisor replied; continued in subagent_reply"));
 
 		const entries: any[] = [];
 		let runtime = register(entries);
