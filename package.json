@@ -20,6 +20,7 @@
       "./exts/backlog/index.ts",
       "./exts/cloud-agents/index.ts",
       "./exts/model-list/index.ts",
+      "./exts/openai-limits/index.ts",
       "./exts/provider-ids/index.ts",
       "./exts/session-memory/index.ts",
       "./exts/session-topic/index.ts",

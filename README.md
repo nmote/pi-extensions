@@ -16,6 +16,7 @@ extension's README lists its commands, agent tools, and usage requirements.
 | [backlog](exts/backlog/README.md) | Persistent repository-labeled work and dependency graphs |
 | [cloud-agents](exts/cloud-agents/README.md) | Cursor and Codex Cloud dispatch, status, and local handoff |
 | [model-list](exts/model-list/README.md) | Available Pi model discovery |
+| [openai-limits](exts/openai-limits/README.md) | Subscription usage and cooperative pause/resume |
 | [provider-ids](exts/provider-ids/README.md) | Provider request identifiers for troubleshooting |
 | [session-memory](exts/session-memory/README.md) | Branch-aware session notes and todos |
 | [session-topic](exts/session-topic/README.md) | Automatic session titles and summaries |
