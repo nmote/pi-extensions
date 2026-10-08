@@ -70,11 +70,11 @@ function harness(options: { autoPause?: boolean; mode?: string } = {}) {
 		emit,
 		async start() { await emit("session_start"); },
 		async run() { idle = false; await emit("agent_start"); },
-		async settle(boundary = true) {
+		async settle(boundary = true, aborted = false) {
 			if (boundary) await emit("agent_before_settle", { outcome: "completed" });
 			idle = true;
 			leaf = "checkpoint";
-			await emit("agent_settled");
+			await emit("agent_settled", { aborted });
 		},
 		async advance(at: number) { now = at; tick?.(); await drain(); },
 		async command(args: string) { await commands.get("openai-limits")!.handler(args, context); await drain(); },
@@ -310,7 +310,7 @@ console.log("PASS: user prompts override both wrapping and paused work, without 
 	console.log("PASS: a late availability response cannot undo a manual override or send a resume");
 }
 
-for (const change of ["leaf", "model", "shutdown", "abort", "compaction", "pending"]) {
+for (const change of ["leaf", "model", "shutdown", "abort", "settled-abort", "compaction", "pending"]) {
 	const h = harness();
 	await h.start();
 	await h.run();
@@ -320,7 +320,8 @@ for (const change of ["leaf", "model", "shutdown", "abort", "compaction", "pendi
 		await h.emit("session_before_compact", { signal: controller.signal });
 		controller.abort();
 	}
-	await h.settle();
+	await h.settle(true, change === "settled-abort");
+	if (change === "settled-abort") assert.equal(h.status, "[OA override]");
 	if (change === "leaf") h.setLeaf("different-task");
 	if (change === "model") {
 		(h.context as any).model = { provider: "anthropic", id: "other", baseUrl: "https://api.anthropic.com" };

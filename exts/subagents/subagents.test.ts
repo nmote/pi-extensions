@@ -467,6 +467,8 @@ try {
 	const failedAgent = makeManager();
 	const failedTask = (await failedAgent.start([task("fail")], process.cwd(), context()))[0]!;
 	check("failed child cannot be reused", failedTask.status === "failed" && (await errorMessage(failedAgent.continue(failedTask.id, "wrong", () => "manual", context()))).includes("while failed"));
+	const abortedSettlement = (await failedAgent.start([task("abort settlement")], process.cwd(), context()))[0]!;
+	check("aborted settlement without an assistant result fails the task", abortedSettlement.status === "failed" && abortedSettlement.error === "Subagent stopped: aborted" && failedAgent.liveCount() === 0);
 	const missingPolicy = makeManager();
 	const previousProtocol = process.env.FAKE_PROTOCOL;
 	try {

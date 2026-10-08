@@ -128,6 +128,10 @@ function processLine(line) {
 			finish("compacted");
 			return;
 		}
+		if (command.message.startsWith("Task: abort settlement")) {
+			send({ type: "agent_settled", aborted: true });
+			return;
+		}
 		if (command.message.startsWith("Task: fail")) {
 			send({ type: "message_end", message: assistant("failure", "error") });
 			send({ type: "agent_settled" });

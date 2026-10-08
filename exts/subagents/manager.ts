@@ -755,6 +755,10 @@ class SubagentRun {
 				this.pushActivity(`extension error: ${String(event.error ?? "unknown")}`);
 				break;
 			case "agent_settled": {
+				if (event.aborted === true) {
+					this.fail("Subagent stopped: aborted");
+					return;
+				}
 				const lastAssistant = this.lastAssistant;
 				if (lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted") {
 					this.fail(lastAssistant.errorMessage || `Subagent stopped: ${lastAssistant.stopReason}`);

@@ -335,10 +335,11 @@ export function registerOpenAILimits(pi: ExtensionAPI, dependencies: Partial<Lim
 			if (version === epoch && phase === "wrapping") override();
 		}, { once: true });
 	});
-	pi.on("agent_settled", (_event, context) => {
+	pi.on("agent_settled", (event, context) => {
 		running = false;
 		if (!ctx) return;
 		ctx = context;
+		if ((phase === "wrapping" || phase === "paused") && event.aborted) override();
 		if (phase === "wrapping" && !settledNormally) override();
 		if (phase === "wrapping") {
 			invalidateRequest();

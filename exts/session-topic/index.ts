@@ -776,8 +776,9 @@ export function registerSessionTopic(
 		}
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("agent_settled", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		if (event.aborted) promptAbort?.abort();
 		const branch = ctx.sessionManager.getBranch();
 		let lastAssistantIndex = -1;
 		for (let index = branch.length - 1; index >= 0; index--) {

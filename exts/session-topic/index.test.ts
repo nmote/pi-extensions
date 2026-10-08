@@ -768,7 +768,7 @@ async function main(): Promise<void> {
 		"retryable prompt submission",
 	);
 	await flushAsync();
-	await settledAbort.finishAssistant("The retried task was canceled.", "aborted");
+	await settledAbort.emit("agent_settled", { type: "agent_settled", aborted: true });
 	check(
 		"settlement immediately aborts metadata for a canceled run",
 		settledSummarySignal?.aborted === true && settledTopicSignal?.aborted === true,
