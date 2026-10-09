@@ -9,14 +9,15 @@ const token = process.env.PI_SUBAGENT_TOKEN;
 let pending;
 let guidanceDialog;
 let mode;
-let acknowledgePolicy = true;
+let acknowledgePolicy = process.env.FAKE_POLICY !== "no-ack";
 let slowDiscovery = false;
 let slowPolicy = false;
 let straySettlement = false;
 const history = existsSync(sessionFile) ? JSON.parse(readFileSync(sessionFile, "utf8").trim().split("\n")[1]).data : [];
 
+let terminalError;
 function persist() {
-	writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: process.cwd(), timestamp: new Date().toISOString() })}\n${JSON.stringify({ type: "custom", id: "history", parentId: null, timestamp: new Date().toISOString(), customType: "fake-history", data: history })}\n`);
+	writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: process.cwd(), timestamp: new Date().toISOString() })}\n${JSON.stringify({ type: "custom", id: "history", parentId: null, timestamp: new Date().toISOString(), customType: "fake-history", data: history })}\n${terminalError ? `${JSON.stringify({ type: "message", id: "provider-error", parentId: "history", timestamp: new Date().toISOString(), message: terminalError })}\n` : ""}`);
 }
 
 function send(value) {
@@ -100,6 +101,7 @@ function processLine(line) {
 		if (command.message.includes("slow discovery")) slowDiscovery = true;
 		if (command.message.includes("slow policy")) slowPolicy = true;
 		if (command.message.includes("stray settlement")) straySettlement = true;
+		terminalError = undefined;
 		history.push({ role: "user", text: command.message });
 		persist();
 		send({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "started" } });
@@ -133,7 +135,20 @@ function processLine(line) {
 			return;
 		}
 		if (command.message.startsWith("Task: fail")) {
-			send({ type: "message_end", message: assistant("failure", "error") });
+			if (command.message.includes("guidance")) send({
+				type: "extension_ui_request", id: "guidance-state", method: "input",
+				title: `[[pi-subagent-guidance:${token}]]`, placeholder: JSON.stringify({ action: "get" }),
+			});
+			terminalError = { ...assistant("", "error"), errorMessage: "Provider quota exhausted" };
+			persist();
+			if (command.message.includes("slow cleanup")) {
+				process.on("SIGTERM", () => {
+					send({ type: "message_end", message: assistant("late old-process output") });
+					send({ type: "agent_settled" });
+					setTimeout(() => process.exit(0), 75);
+				});
+			}
+			send({ type: "message_end", message: terminalError });
 			send({ type: "agent_settled" });
 			return;
 		}

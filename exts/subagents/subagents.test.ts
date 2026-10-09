@@ -13,7 +13,7 @@ import {
 } from "./agents.ts";
 import { formatSpawnCall, summarizePurpose } from "./purpose.ts";
 import subagents from "./index.ts";
-import { SubagentManager } from "./manager.ts";
+import { SubagentManager, type SubagentManagerOptions } from "./manager.ts";
 import { RpcProcess } from "./rpc.ts";
 import { restoreSubagents, SUBAGENT_STATE_ENTRY } from "./state.ts";
 import { createProgressReporter, type SubagentDetails } from "./progress.ts";
@@ -129,11 +129,12 @@ try {
 }
 
 const managers: SubagentManager[] = [];
-const makeManager = (onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void, onLiveCountChange?: (count: number) => void) => {
+const makeManager = (onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void, onLiveCountChange?: (count: number) => void, onGuidanceRequest?: SubagentManagerOptions["onGuidanceRequest"]) => {
 	const manager = new SubagentManager({
 		invocation: { command: process.execPath, argsPrefix: [fixture] },
 		onAutoApproveStat,
 		onLiveCountChange,
+		onGuidanceRequest,
 	});
 	managers.push(manager);
 	return manager;
@@ -465,10 +466,80 @@ try {
 	check("ended child cannot be reused", (await errorMessage(reusable.continue(firstTask.id, "wrong", () => "manual", context()))).includes("while cancelled"));
 
 	const failedAgent = makeManager();
-	const failedTask = (await failedAgent.start([task("fail")], process.cwd(), context()))[0]!;
-	check("failed child cannot be reused", failedTask.status === "failed" && (await errorMessage(failedAgent.continue(failedTask.id, "wrong", () => "manual", context()))).includes("while failed"));
-	const abortedSettlement = (await failedAgent.start([task("abort settlement")], process.cwd(), context()))[0]!;
-	check("aborted settlement without an assistant result fails the task", abortedSettlement.status === "failed" && abortedSettlement.error === "Subagent stopped: aborted" && failedAgent.liveCount() === 0);
+	const failedTask = (await failedAgent.start([task("fail slow cleanup")], process.cwd(), context()))[0]!;
+	failedAgent.consumeUsage([failedTask.id]);
+	check("provider failure exposes saved context and explicit recovery", failedTask.status === "failed" && failedTask.failureKind === "provider" && failedTask.recoverable === true && !!failedTask.sessionFile && formatExpandedMetadata(failedTask).includes("continue explicitly"));
+	const recovering = failedAgent.continue(failedTask.id, "recall after quota", () => "manual", context());
+	const duplicateRecovery = await errorMessage(failedAgent.continue(failedTask.id, "wrong", () => "manual", context()));
+	const recoveredTask = await recovering;
+	const recoveredInfo = JSON.parse(recoveredTask.output!);
+	check("recovery reserves the run and ignores late old-process events", duplicateRecovery.includes("while running") && recoveredTask.status === "idle" && recoveredTask.usage.totalTokens === 18);
+	check("recovery retains identity, context, settings and lifetime accounting", recoveredTask.id === failedTask.id && recoveredTask.taskNumber === 2 && recoveredInfo.history[0].text === "Task: fail slow cleanup" && recoveredInfo.mode === "manual" && recoveredInfo.args[recoveredInfo.args.indexOf("--model") + 1] === failedTask.model && recoveredTask.totalUsage.totalTokens === 36 && failedAgent.consumeUsage([failedTask.id]).totalTokens === 18 && recoveredTask.previousFailure?.message === failedTask.error);
+	const repeatedFailure = await failedAgent.continue(failedTask.id, "fail again", () => "manual", context());
+	check("repeated quota failure remains explicitly recoverable", repeatedFailure.status === "failed" && repeatedFailure.recoverable === true && repeatedFailure.totalUsage.totalTokens === 54);
+	const savedFailure = failedAgent.persistedState();
+	await failedAgent.shutdown();
+	const restoredFailure = makeManager();
+	restoredFailure.restore(restoreSubagents([{ type: "custom", customType: SUBAGENT_STATE_ENTRY, data: { version: 1, runs: savedFailure } }] as any));
+	const historicalFailure = structuredClone(savedFailure);
+	delete historicalFailure[0].snapshot.failureKind;
+	const historical = makeManager();
+	historical.restore(historicalFailure);
+	check("historical provider errors are verified from saved transcripts", historical.status(failedTask.id)[0].recoverable === true);
+	const unverified = makeManager();
+	historicalFailure[0].snapshot.error = "Unrelated protocol error";
+	unverified.restore(historicalFailure);
+	check("unverified historical failures cannot be recovered", !unverified.status(failedTask.id)[0].recoverable && (await errorMessage(unverified.continue(failedTask.id, "wrong", () => "manual", context()))).includes("while failed"));
+	let recoveryApprovals = 0;
+	const restoredApproval = await restoredFailure.continue(failedTask.id, "approval after reload", () => "manual", context({ select: async () => { recoveryApprovals++; return "Deny"; } }));
+	check("provider recovery after reload rebuilds the UI lifetime", restoredApproval.status === "idle" && restoredApproval.output === "user decision: Deny" && recoveryApprovals === 1 && restoredApproval.totalUsage.totalTokens === 72);
+
+	for (const lateReject of [false, true]) {
+		let calls = 0;
+		let finishOld!: () => void;
+		let finishNew!: () => void;
+		let newOpened!: () => void;
+		const newReady = new Promise<void>((resolve) => { newOpened = resolve; });
+		const guidanceRecovery = makeManager(undefined, undefined, async () => new Promise((resolve, reject) => {
+			if (calls++ === 0) {
+				finishOld = lateReject ? () => reject(new Error("Old guidance failed")) : () => resolve({ text: "OLD stale policy", revision: 0 });
+			} else {
+				finishNew = () => resolve({ text: "Current policy", revision: 1 });
+				newOpened();
+			}
+		}));
+		const [failed] = await guidanceRecovery.start([task("fail guidance")], process.cwd(), context());
+		const continuation = guidanceRecovery.continue(failed.id, "guidance", () => "manual", context());
+		await newReady;
+		finishOld();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		finishNew();
+		const result = await continuation;
+		check(`late guidance ${lateReject ? "failure" : "success"} cannot answer the replacement process`, result.status === "idle" && result.output === JSON.stringify({ text: "Current policy", revision: 1 }));
+	}
+
+	const cancelRecovery = makeManager();
+	const cancelFailure = (await cancelRecovery.start([task("fail slow cleanup")], process.cwd(), context()))[0]!;
+	const recoveryAbort = new AbortController();
+	const cancelledRecovery = cancelRecovery.continue(cancelFailure.id, "must not run", () => "manual", context(), undefined, recoveryAbort.signal);
+	recoveryAbort.abort();
+	check("cancellation during cleanup prevents reopening or model execution", (await cancelledRecovery).status === "cancelled" && cancelRecovery.status(cancelFailure.id)[0].usage.totalTokens === 0 && (await errorMessage(cancelRecovery.continue(cancelFailure.id, "wrong", () => "manual", context()))).includes("while cancelled"));
+	const missingRecovery = makeManager();
+	const missingFailure = (await missingRecovery.start([task("fail")], process.cwd(), context()))[0]!;
+	const missingState = missingRecovery.persistedState();
+	await missingRecovery.shutdown();
+	await rm(missingState[0].sessionDir, { recursive: true });
+	const missingRestored = makeManager();
+	missingRestored.restore(missingState);
+	check("missing failed sessions cannot silently start fresh", !missingRestored.status(missingFailure.id)[0].recoverable && (await errorMessage(missingRestored.continue(missingFailure.id, "wrong", () => "manual", context()))).includes("Saved session"));
+	const cancelFailed = makeManager();
+	const cancellable = (await cancelFailed.start([task("fail")], process.cwd(), context()))[0]!;
+	await cancelFailed.cancel();
+	check("cancelling failed children permanently disables recovery", cancelFailed.status(cancellable.id)[0].status === "cancelled" && (await errorMessage(cancelFailed.continue(cancellable.id, "wrong", () => "manual", context()))).includes("while cancelled"));
+
+	const abortedAgent = makeManager();
+	const abortedSettlement = (await abortedAgent.start([task("abort settlement")], process.cwd(), context()))[0]!;
+	check("aborted settlement without an assistant result cannot recover", abortedSettlement.status === "failed" && abortedSettlement.failureKind === "aborted" && abortedSettlement.error === "Subagent stopped: aborted" && !abortedSettlement.recoverable && (await errorMessage(abortedAgent.continue(abortedSettlement.id, "wrong", () => "manual", context()))).includes("while failed"));
 	const missingPolicy = makeManager();
 	const previousProtocol = process.env.FAKE_PROTOCOL;
 	try {
@@ -479,14 +550,14 @@ try {
 		}
 		delete process.env.FAKE_PROTOCOL;
 		const original = makeManager();
-		const [retained] = await original.start([task("recall persistent")], process.cwd(), context());
+		const [retained] = await original.start([task("fail")], process.cwd(), context());
 		const state = original.persistedState();
 		await original.shutdown();
 		const restored = makeManager();
 		restored.restore(state);
 		process.env.FAKE_PROTOCOL = "2";
 		const result = await restored.continue(retained.id, "must not run", () => "auto", context());
-		check("reopened processes repeat the protocol handshake", result.status === "failed" && !!result.error?.includes("parent=1, child=2") && result.usage.totalTokens === 0);
+		check("provider recovery repeats the protocol handshake and fails closed", result.status === "failed" && result.failureKind === "protocol" && !result.recoverable && !!result.error?.includes("parent=1, child=2") && result.usage.totalTokens === 0 && (await errorMessage(restored.continue(retained.id, "wrong", () => "manual", context()))).includes("while failed"));
 	} finally {
 		if (previousProtocol === undefined) delete process.env.FAKE_PROTOCOL;
 		else process.env.FAKE_PROTOCOL = previousProtocol;
@@ -494,7 +565,18 @@ try {
 
 	const policyTask = (await missingPolicy.start([task("no policy")], process.cwd(), context()))[0]!;
 	const noAck = await missingPolicy.continue(policyTask.id, "recall", () => "manual", context());
-	check("missing policy acknowledgement fails closed", noAck.status === "failed" && !!noAck.error?.includes("not acknowledged") && noAck.output === undefined);
+	check("missing policy acknowledgement fails closed", noAck.status === "failed" && noAck.failureKind === "policy" && !noAck.recoverable && !!noAck.error?.includes("not acknowledged") && noAck.output === undefined);
+	const recoveryPolicy = makeManager();
+	const policyFailure = (await recoveryPolicy.start([task("fail")], process.cwd(), context()))[0]!;
+	const previousPolicy = process.env.FAKE_POLICY;
+	try {
+		process.env.FAKE_POLICY = "no-ack";
+		const result = await recoveryPolicy.continue(policyFailure.id, "must not run", () => "manual", context());
+		check("provider recovery requires current policy acknowledgement", result.status === "failed" && result.failureKind === "policy" && !result.recoverable && result.output === undefined && result.usage.totalTokens === 0);
+	} finally {
+		if (previousPolicy === undefined) delete process.env.FAKE_POLICY;
+		else process.env.FAKE_POLICY = previousPolicy;
+	}
 
 	const delayed = makeManager();
 	const delayedTask = (await delayed.start([task("recall slow discovery")], process.cwd(), context()))[0]!;
@@ -526,7 +608,7 @@ try {
 	for (let attempt = 0; attempt < 100 && idleCrash.status(crashingTask.id)[0]?.status === "idle"; attempt++) {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
-	check("idle process exit is visible as failure", idleCrash.status(crashingTask.id)[0]?.status === "failed");
+	check("idle process exit is visible as a non-recoverable failure", idleCrash.status(crashingTask.id)[0]?.failureKind === "process" && !idleCrash.status(crashingTask.id)[0]?.recoverable && (await errorMessage(idleCrash.continue(crashingTask.id, "wrong", () => "manual", context()))).includes("while failed"));
 	check("idle crash removes the live count without a tool call", idleCrash.liveCount() === 0 && crashCounts.join(",") === "1,0");
 
 	const cleanup = makeManager();

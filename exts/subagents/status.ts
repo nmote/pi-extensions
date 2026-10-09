@@ -46,7 +46,7 @@ function formatModel(result: SubagentSnapshot): string {
 }
 
 export function formatResultHeading(result: SubagentSnapshot): string {
-	const status = result.status === "waiting" ? "waiting for supervisor" : result.status;
+	const status = result.status === "waiting" ? "waiting for supervisor" : result.status === "failed" && result.failureKind ? `failed (${result.failureKind}${result.recoverable ? "; recoverable" : ""})` : result.status;
 	return `### ${result.agent} (${result.id}) — task ${result.taskNumber ?? 1} · ${status} · ${formatCost(result)}`;
 }
 
@@ -60,11 +60,14 @@ export function formatExpandedMetadata(result: SubagentSnapshot): string {
 		`- Lifetime cost: $${(result.totalUsage ?? result.usage).cost.total.toFixed(3)}`,
 		`- Model: ${formatModel(result)}`,
 		`- Working directory: ${result.cwd}`,
+		...(result.failureKind ? [`- Failure: ${result.failureKind}${result.recoverable ? "; continue explicitly after resolving the provider error" : "; not recoverable"}`] : []),
+		...(result.previousFailure ? [`- Previous failure (${result.previousFailure.kind}): ${result.previousFailure.message}`] : []),
+		...(result.sessionFile ? [`- Saved session: ${result.sessionFile}`] : []),
 	].join("\n");
 }
 
 export function formatRunStatus(result: SubagentSnapshot, now = Date.now()): string {
-	return `${statusIcon(result.status)} ${result.agent} ${result.id} · task ${result.taskNumber ?? 1} · ${formatModel(result)} · ${formatElapsedTime(result, now)} · ${formatCost(result)} · ${result.phase}`;
+	return `${statusIcon(result.status)} ${result.agent} ${result.id} · task ${result.taskNumber ?? 1} · ${formatModel(result)} · ${formatElapsedTime(result, now)} · ${formatCost(result)} · ${result.phase}${result.recoverable ? " · recoverable via subagent_continue" : ""}`;
 }
 
 export function formatActivity(result: SubagentSnapshot): string {

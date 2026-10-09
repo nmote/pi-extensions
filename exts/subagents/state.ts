@@ -18,6 +18,7 @@ export interface PersistedSubagentRun {
 
 const thinking = Type.Union(["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => Type.Literal(level)));
 const count = Type.Number({ minimum: 0 });
+const failureKind = Type.Union(["provider", "aborted", "process", "protocol", "policy"].map((kind) => Type.Literal(kind)));
 const usage = Type.Object({
 	input: count, output: count, cacheRead: count, cacheWrite: count, totalTokens: count,
 	cost: Type.Object({ input: count, output: count, cacheRead: count, cacheWrite: count, total: count }),
@@ -45,6 +46,9 @@ const schema = Type.Object({
 				question: Type.String(), context: Type.Optional(Type.String()), options: Type.Optional(Type.Array(Type.String())),
 			})),
 			output: Type.Optional(Type.String()), error: Type.Optional(Type.String()),
+			failureKind: Type.Optional(failureKind),
+			previousFailure: Type.Optional(Type.Object({ kind: failureKind, message: Type.String() })),
+			sessionFile: Type.Optional(Type.String()), recoverable: Type.Optional(Type.Boolean()),
 			activity: Type.Array(Type.Object({ at: count, message: Type.String() })),
 			usage, totalUsage: usage,
 		}),

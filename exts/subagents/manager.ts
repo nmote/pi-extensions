@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -39,6 +40,13 @@ const SESSION_ENV_VARS = new Set([
 
 // Completed is retained for historical tool results.
 export type SubagentStatus = "starting" | "running" | "waiting" | "idle" | "completed" | "failed" | "cancelled";
+export type FailureKind = "provider" | "aborted" | "process" | "protocol" | "policy";
+
+class SubagentFailure extends Error {
+	constructor(message: string, readonly kind: FailureKind) {
+		super(message);
+	}
+}
 
 export interface SubagentActivity {
 	at: number;
@@ -82,6 +90,10 @@ export interface SubagentSnapshot {
 	question?: SupervisorQuestion;
 	output?: string;
 	error?: string;
+	failureKind?: FailureKind;
+	previousFailure?: { kind: FailureKind; message: string };
+	sessionFile?: string;
+	recoverable?: boolean;
 	activity: SubagentActivity[];
 	usage: UsageTotals;
 	totalUsage: UsageTotals;
@@ -232,7 +244,8 @@ class SubagentRun {
 	readonly token = randomUUID();
 	private rpc?: RpcProcess;
 	private suspending = false;
-	private readonly uiLifetime = new AbortController();
+	private uiLifetime = new AbortController();
+	private cleanup = Promise.resolve();
 	private restoredQuestion?: SupervisorQuestion;
 	private readonly sessionId: string = randomUUID();
 	private readonly sessionDir = join(getAgentDir(), "subagents", this.sessionId);
@@ -254,6 +267,8 @@ class SubagentRun {
 	private updatedAt = this.startedAt;
 	private output?: string;
 	private error?: string;
+	private failureKind?: FailureKind;
+	private previousFailure?: { kind: FailureKind; message: string };
 	private lastAssistant?: Record<string, any>;
 	private readonly activity: SubagentActivity[] = [];
 	private usage = emptyUsage();
@@ -283,11 +298,16 @@ class SubagentRun {
 			this.updatedAt = state.snapshot.updatedAt;
 			this.output = state.snapshot.output;
 			this.error = state.snapshot.error;
+			this.failureKind = state.snapshot.failureKind;
+			this.previousFailure = state.snapshot.previousFailure;
 			this.usage = structuredClone(state.snapshot.usage);
 			Object.assign(this.totalUsage, structuredClone(state.snapshot.totalUsage));
 			this.accountedUsage = structuredClone(state.accountedUsage);
 			this.status = state.snapshot.status;
 			this.phase = state.snapshot.phase;
+			if (this.status === "failed" && !this.failureKind && this.hasSavedProviderError()) {
+				this.failureKind = "provider";
+			}
 			this.activity.splice(0, this.activity.length, ...structuredClone(state.snapshot.activity));
 			if (["starting", "running", "waiting"].includes(this.status)) {
 				// A session restores messages, not an outstanding ask_supervisor RPC execution.
@@ -319,7 +339,36 @@ class SubagentRun {
 		this.hooks = hooks;
 	}
 
+	private savedSession(): string | undefined {
+		return SessionManager.findById(this.task.cwd, this.sessionId, this.sessionDir);
+	}
+
+	private hasSavedProviderError(): boolean {
+		const file = this.savedSession();
+		if (!file) return false;
+		try {
+			const entries = readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			const session = SessionManager.inMemory(this.task.cwd, undefined, entries);
+			const last = session.getBranch().filter((entry) => entry.type === "message").at(-1);
+			return last?.type === "message" && last.message.role === "assistant"
+				&& last.message.stopReason === "error"
+				&& (last.message.errorMessage || "Subagent stopped: error") === this.error;
+		} catch {
+			return false;
+		}
+	}
+
+	assertCanContinue(): void {
+		if (this.suspending || (this.status !== "idle" && !(this.status === "failed" && this.failureKind === "provider"))) {
+			throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}${this.failureKind ? ` (${this.failureKind})` : ""}`);
+		}
+		if (this.status === "failed" && !this.savedSession()) {
+			throw new Error(`Saved session for subagent ${this.id} is missing: ${this.sessionId}`);
+		}
+	}
+
 	snapshot(): SubagentSnapshot {
+		const sessionFile = this.status === "starting" || this.status === "running" ? undefined : this.savedSession();
 		return {
 			id: this.id,
 			agent: this.task.agent,
@@ -336,6 +385,10 @@ class SubagentRun {
 			question: this.pendingQuestion?.question ?? this.restoredQuestion,
 			output: this.output,
 			error: this.error,
+			failureKind: this.failureKind,
+			previousFailure: this.previousFailure ? { ...this.previousFailure } : undefined,
+			sessionFile,
+			recoverable: this.status === "failed" && this.failureKind === "provider" && !!sessionFile,
 			activity: this.activity.map((entry) => ({ ...entry })),
 			usage: structuredClone(this.usage),
 			totalUsage: structuredClone(this.totalUsage),
@@ -363,14 +416,7 @@ class SubagentRun {
 				await this.cleanupPrompt();
 				return checkpoint;
 			}
-			this.rpc = new RpcProcess(
-				this.invocation,
-				this.task.cwd,
-				createChildEnvironment(this.id, this.token, this.task.cwd),
-				(event) => this.handleEvent(event),
-				(error) => this.handleExit(error),
-				(event) => this.isGuidanceEvent(event),
-			);
+			this.rpc = this.createRpc();
 			await this.rpc.start(this.buildArguments());
 			if (!this.isStopped()) await this.handshake();
 			if (this.isStopped()) {
@@ -383,16 +429,16 @@ class SubagentRun {
 			this.emitUpdate();
 			await this.rpc.send({ type: "prompt", message: `Task: ${this.task.task}` });
 		} catch (error) {
-			this.fail(error instanceof Error ? error.message : String(error));
+			this.fail(error instanceof Error ? error.message : String(error), error instanceof SubagentFailure ? error.kind : "process");
 		}
 		return checkpoint;
 	}
 
 	async continue(task: string, getAutoApproveMode: () => string, hooks: OperationHooks): Promise<SubagentSnapshot> {
-		if (this.status !== "idle" || this.suspending) {
-			throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}`);
-		}
+		this.assertCanContinue();
 		if (!task.trim()) throw new Error("Subagent task must not be blank");
+		const recovering = this.status === "failed";
+		if (recovering) this.previousFailure = { kind: this.failureKind!, message: this.error! };
 		this.setStatus("running");
 		this.preparingTask = true;
 		this.hooks = hooks;
@@ -402,6 +448,7 @@ class SubagentRun {
 		this.taskEndedAt = undefined;
 		this.output = undefined;
 		this.error = undefined;
+		this.failureKind = undefined;
 		this.lastAssistant = undefined;
 		this.restoredQuestion = undefined;
 		this.activity.length = 0;
@@ -411,6 +458,16 @@ class SubagentRun {
 		this.onStateChange();
 		this.emitUpdate();
 		try {
+			if (recovering) {
+				await this.cleanup;
+				if (!this.isRunning()) return checkpoint;
+				this.uiLifetime = new AbortController();
+				this.pendingQuestion = undefined;
+				this.expectedProtocolAck = undefined;
+				this.childProtocolVersion = undefined;
+				this.expectedPolicyAck = undefined;
+				this.policyAcknowledged = false;
+			}
 			await verifyCanonicalDirectories([this.task.cwd], this.parentCwd);
 			if (!this.isRunning()) return checkpoint;
 			if (!this.rpc) await this.reopen();
@@ -420,7 +477,7 @@ class SubagentRun {
 			const commands = await rpc.send({ type: "get_commands" });
 			if (!this.isRunning()) return checkpoint;
 			if (!commands.data?.commands?.some((command: { name: string }) => command.name === SUBAGENT_TASK_COMMAND)) {
-				throw new Error("Subagent task policy command is unavailable");
+				throw new SubagentFailure("Subagent task policy command is unavailable", "policy");
 			}
 			const autoApproveMode = getAutoApproveMode();
 			this.expectedPolicyAck = taskPolicyAck(this.token, autoApproveMode);
@@ -433,14 +490,14 @@ class SubagentRun {
 			if (!this.isRunning()) return checkpoint;
 			this.expectedPolicyAck = undefined;
 			if (response.data?.disposition !== "handled" || !this.policyAcknowledged) {
-				throw new Error("Subagent approval policy update was not acknowledged");
+				throw new SubagentFailure("Subagent approval policy update was not acknowledged", "policy");
 			}
 			this.setPhase("starting model");
 			this.emitUpdate();
 			this.preparingTask = false;
 			await rpc.send({ type: "prompt", message: `Task: ${task}` });
 		} catch (error) {
-			this.fail(error instanceof Error ? error.message : String(error));
+			this.fail(error instanceof Error ? error.message : String(error), error instanceof SubagentFailure ? error.kind : "process");
 		}
 		return checkpoint;
 	}
@@ -465,8 +522,18 @@ class SubagentRun {
 		return checkpoint;
 	}
 
+	private createRpc(): RpcProcess {
+		const rpc: RpcProcess = new RpcProcess(
+			this.invocation, this.task.cwd, createChildEnvironment(this.id, this.token, this.task.cwd),
+			(event) => this.rpc === rpc ? this.handleEvent(event) : Promise.resolve(),
+			(error) => { if (this.rpc === rpc) this.handleExit(error); },
+			(event) => this.isGuidanceEvent(event),
+		);
+		return rpc;
+	}
+
 	private async reopen(): Promise<void> {
-		const sessionFile = SessionManager.findById(this.task.cwd, this.sessionId, this.sessionDir);
+		const sessionFile = this.savedSession();
 		if (!sessionFile) {
 			throw new Error(`Saved session for subagent ${this.id} is missing: ${this.sessionId}`);
 		}
@@ -475,11 +542,7 @@ class SubagentRun {
 			await this.cleanupPrompt();
 			return;
 		}
-		this.rpc = new RpcProcess(
-			this.invocation, this.task.cwd, createChildEnvironment(this.id, this.token, this.task.cwd),
-			(event) => this.handleEvent(event), (error) => this.handleExit(error),
-			(event) => this.isGuidanceEvent(event),
-		);
+		this.rpc = this.createRpc();
 		await this.rpc.start(this.buildArguments(sessionFile));
 		if (!this.isStopped()) await this.handshake();
 		if (this.isStopped()) await this.rpc.stop();
@@ -505,7 +568,7 @@ class SubagentRun {
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			throw new Error(message.startsWith("Timed out") ? "Subagent protocol handshake timed out. Restart the subagent; if it persists, reload the parent session." : message);
+			throw new SubagentFailure(message.startsWith("Timed out") ? "Subagent protocol handshake timed out. Restart the subagent; if it persists, reload the parent session." : message, "protocol");
 		} finally {
 			this.expectedProtocolAck = undefined;
 		}
@@ -515,34 +578,36 @@ class SubagentRun {
 		this.suspending = true;
 		this.uiLifetime.abort();
 		this.settleCheckpoint();
+		await this.cleanup;
 		await this.rpc?.stop();
 		await this.cleanupPrompt();
 	}
 
 	async cancel(): Promise<SubagentSnapshot> {
-		if (!TERMINAL_STATUSES.has(this.status)) {
+		if (this.status !== "completed" && this.status !== "cancelled") {
 			this.taskEndedAt ??= Date.now();
 			this.setStatus("cancelled");
 			this.error = "Cancelled by supervisor";
+			this.failureKind = undefined;
 			this.setPhase("cancelled");
 			this.pendingQuestion = undefined;
 			this.restoredQuestion = undefined;
 			this.settleCheckpoint();
 			this.onStateChange();
 		}
+		await this.cleanup;
 		await this.rpc?.stop();
 		await this.cleanupPrompt();
 		return this.snapshot();
 	}
 
-	sendUiResponse(response: Record<string, unknown>): void {
-		if (TERMINAL_STATUSES.has(this.status)) return;
-		if (!this.rpc) throw new Error("Subagent process is not running");
-		try {
-			this.rpc.sendUiResponse(response);
-		} catch (error) {
-			if (!TERMINAL_STATUSES.has(this.status)) throw error;
-		}
+	uiResponder(): (response: Record<string, unknown>) => void {
+		const rpc = this.rpc;
+		return (response) => {
+			if (this.rpc !== rpc || this.isStopped()) return;
+			if (!rpc) throw new Error("Subagent process is not running");
+			rpc.sendUiResponse(response);
+		};
 	}
 
 	currentContext(): ExtensionContext | undefined {
@@ -638,10 +703,11 @@ class SubagentRun {
 
 	private async handleEvent(event: Record<string, any>): Promise<void> {
 		if (this.isStopped()) return;
+		const source = this.rpc;
 		if (this.status === "idle" || this.preparingTask) {
 			const dialog = event.type === "extension_ui_request" && isDialogRequest(event as RpcExtensionUIRequest);
 			if (dialog || ["agent_start", "agent_settled", "turn_start", "message_start", "message_end", "tool_execution_start"].includes(event.type)) {
-				this.fail("Unexpected subagent activity outside an assigned task");
+				this.fail("Unexpected subagent activity outside an assigned task", "protocol");
 				return;
 			}
 			if (this.status === "idle") return;
@@ -649,7 +715,7 @@ class SubagentRun {
 		if (event.type === "extension_ui_request") {
 			const request = event as RpcExtensionUIRequest;
 			if (request.method === "notify" && typeof request.message === "string" && (request.message.startsWith("Subagent protocol mismatch:") || request.message.startsWith("Subagent protocol failure:"))) {
-				this.fail(request.message);
+				this.fail(request.message, "protocol");
 				return;
 			}
 			if (request.method === "notify" && typeof request.message === "string" && this.expectedProtocolAck && request.message.startsWith(protocolAck(this.token, ""))) {
@@ -685,7 +751,7 @@ class SubagentRun {
 			try {
 				await this.routeUi(this, request);
 			} finally {
-				if (isDialogRequest(request) && this.status === "running") {
+				if (this.rpc === source && isDialogRequest(request) && this.status === "running") {
 					this.setPhase("resuming after user input");
 					this.emitUpdate();
 				}
@@ -756,12 +822,12 @@ class SubagentRun {
 				break;
 			case "agent_settled": {
 				if (event.aborted === true) {
-					this.fail("Subagent stopped: aborted");
+					this.fail("Subagent stopped: aborted", "aborted");
 					return;
 				}
 				const lastAssistant = this.lastAssistant;
 				if (lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted") {
-					this.fail(lastAssistant.errorMessage || `Subagent stopped: ${lastAssistant.stopReason}`);
+					this.fail(lastAssistant.errorMessage || `Subagent stopped: ${lastAssistant.stopReason}`, lastAssistant.stopReason === "error" ? "provider" : "aborted");
 				} else {
 					this.setStatus("idle");
 					this.setPhase("task complete; idle");
@@ -781,17 +847,22 @@ class SubagentRun {
 		this.fail(error?.message ?? "Subagent process exited unexpectedly");
 	}
 
-	private fail(message: string): void {
+	private fail(message: string, kind: FailureKind = "process"): void {
 		if (this.isStopped()) return;
 		this.taskEndedAt ??= Date.now();
 		this.setStatus("failed");
 		this.error = message;
-		this.setPhase("failed");
+		this.failureKind = kind;
+		this.setPhase(kind === "provider" ? "provider failed; continue explicitly after resolving the error" : "failed");
 		this.pushActivity(message);
+		const rpc = this.rpc;
+		this.rpc = undefined;
+		this.cleanup = (rpc?.stop() ?? Promise.resolve()).then(async () => {
+			await rpc?.flushEvents();
+			await this.cleanupPrompt();
+		});
 		this.settleCheckpoint();
 		this.onStateChange();
-		const stop = this.rpc?.stop() ?? Promise.resolve();
-		void stop.finally(() => this.cleanupPrompt());
 	}
 }
 
@@ -920,8 +991,7 @@ export class SubagentManager {
 	): Promise<SubagentSnapshot> {
 		const run = this.requireRun(id);
 		this.ensureCanStart(this.shutdownController.signal);
-		const status = run.snapshot().status;
-		if (status !== "idle") throw new Error(`Subagent ${id} cannot accept a task while ${status}`);
+		run.assertCanContinue();
 		if (!task.trim()) throw new Error("Subagent task must not be blank");
 		if (signal?.aborted) return run.cancel();
 		const abort = () => void run.cancel();
@@ -958,7 +1028,10 @@ export class SubagentManager {
 	}
 
 	async cancel(id?: string): Promise<SubagentSnapshot[]> {
-		const runs = id ? [this.requireRun(id)] : [...this.runs.values()].filter((run) => !TERMINAL_STATUSES.has(run.snapshot().status));
+		const runs = id ? [this.requireRun(id)] : [...this.runs.values()].filter((run) => {
+			const snapshot = run.snapshot();
+			return !TERMINAL_STATUSES.has(snapshot.status) || (snapshot.status === "failed" && snapshot.failureKind === "provider");
+		});
 		return Promise.all(runs.map((run) => run.cancel()));
 	}
 
@@ -1044,25 +1117,26 @@ export class SubagentManager {
 	}
 
 	private async enqueueUserUi(run: SubagentRun, request: RpcExtensionUIRequest): Promise<void> {
+		const respond = run.uiResponder();
+		const ctx = run.currentContext();
 		if (request.method === "input" && isGuidanceTitle(request.title, run.token)) {
 			const policyRequest = parseGuidanceRequest(request.placeholder);
-			const ctx = run.currentContext();
 			try {
 				if (ctx?.signal?.aborted) throw new GuidanceError("REQUEST_CANCELLED", "Session guidance request cancelled");
 				if (!policyRequest || !ctx || !this.onGuidanceRequest) throw new GuidanceError("GUIDANCE_UNAVAILABLE", "Session guidance is unavailable");
 				const policy = await this.onGuidanceRequest(policyRequest, ctx);
-				run.sendUiResponse({ type: "extension_ui_response", id: request.id, value: JSON.stringify({ ok: true, guidance: policy }) });
+				respond({ type: "extension_ui_response", id: request.id, value: JSON.stringify({ ok: true, guidance: policy }) });
 			} catch (error) {
-				run.sendUiResponse({ type: "extension_ui_response", id: request.id, value: JSON.stringify(guidanceFailure(error)) });
+				respond({ type: "extension_ui_response", id: request.id, value: JSON.stringify(guidanceFailure(error)) });
 			}
 			return;
 		}
-		if (!isDialogRequest(request)) return this.routeUserUi(run, request);
-		await this.enqueueDialog(() => this.routeUserUi(run, request));
+		if (!isDialogRequest(request)) return this.routeUserUi(run, request, ctx, respond);
+		await this.enqueueDialog(() => this.routeUserUi(run, request, ctx, respond), ctx?.signal);
 	}
 
-	private async routeUserUi(run: SubagentRun, request: RpcExtensionUIRequest): Promise<void> {
-		const ctx = run.currentContext();
+	private async routeUserUi(run: SubagentRun, request: RpcExtensionUIRequest, ctx: ExtensionContext | undefined, respond: (response: Record<string, unknown>) => void): Promise<void> {
+		if (ctx?.signal?.aborted) return;
 		if (!isDialogRequest(request)) {
 			if (request.method === "notify") {
 				if (typeof request.message !== "string") return;
@@ -1079,7 +1153,7 @@ export class SubagentManager {
 		}
 
 		if (!ctx?.hasUI) {
-			run.sendUiResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+			respond({ type: "extension_ui_response", id: request.id, cancelled: true });
 			return;
 		}
 
@@ -1097,7 +1171,7 @@ export class SubagentManager {
 			const value = approvalTitle !== undefined && this.onApprovalRequest
 				? await this.onApprovalRequest(ctx, title, request.options)
 				: await ctx.ui.select(title, request.options, uiOptions);
-			run.sendUiResponse(
+			respond(
 				value === undefined
 					? { type: "extension_ui_response", id: request.id, cancelled: true }
 					: { type: "extension_ui_response", id: request.id, value },
@@ -1106,12 +1180,12 @@ export class SubagentManager {
 		}
 		if (request.method === "confirm") {
 			const confirmed = await ctx.ui.confirm(title, request.message, uiOptions);
-			run.sendUiResponse({ type: "extension_ui_response", id: request.id, confirmed });
+			respond({ type: "extension_ui_response", id: request.id, confirmed });
 			return;
 		}
 		if (request.method === "input") {
 			const value = await ctx.ui.input(title, request.placeholder, uiOptions);
-			run.sendUiResponse(
+			respond(
 				value === undefined
 					? { type: "extension_ui_response", id: request.id, cancelled: true }
 					: { type: "extension_ui_response", id: request.id, value },
@@ -1120,7 +1194,7 @@ export class SubagentManager {
 		}
 		if (request.method !== "editor") return;
 		const value = await ctx.ui.editor(title, request.prefill);
-		run.sendUiResponse(
+		respond(
 			value === undefined
 				? { type: "extension_ui_response", id: request.id, cancelled: true }
 				: { type: "extension_ui_response", id: request.id, value },
