@@ -25,14 +25,16 @@ extension's README lists its commands, agent tools, and usage requirements.
 
 ## Install
 
-```sh
-pi install git:github.com/nmote/pi-extensions@v0.1.0
-```
-
-To follow the default branch instead:
+To get updates as I make improvements:
 
 ```sh
 pi install git:github.com/nmote/pi-extensions
+```
+
+To pin to a specific version:
+
+```sh
+pi install git:github.com/nmote/pi-extensions@v0.1.0
 ```
 
 ### Local development
