@@ -54,6 +54,43 @@ async function main(): Promise<void> {
 			!throws(() => validateUrl("https://example.com/docs?q=1")),
 	);
 
+	const googleSearchUrls = [
+		"https://www.google.com/search?q=x",
+		"https://google.com/search?q=x",
+		"https://encrypted.google.com/search?q=x",
+		"https://www.google.co.uk/search?q=x",
+		"https://www.google.com.br/search?q=x",
+		"https://www.google.com/webhp?q=x",
+		"https://www.google.com/advanced_search",
+		"https://www.google.com/",
+		"https://google.com/",
+		"https://images.google.com/",
+		"https://images.google.com/imghp?q=x",
+		"https://news.google.com/",
+		"https://news.google.com/nshp?q=x",
+		"https://www.google.com./search?q=x",
+		"https://www.google.com/%73earch?q=x",
+	];
+	const otherGoogleUrls = [
+		"https://developers.google.com/",
+		"https://cloud.google.com/docs",
+		"https://docs.google.com/document/d/abc",
+		"https://news.google.com/articles/abc",
+		"https://maps.google.com/?q=paris",
+		"https://google.com.example.org/search?q=x",
+		"https://notgoogle.com/search?q=x",
+		"https://www.googleapis.com/youtube/v3/videos?id=abc",
+	];
+	check(
+		"URL validation refuses Google search entry points and allows other Google resources",
+		googleSearchUrls.every((text) => throws(() => validateUrl(text))) &&
+			otherGoogleUrls.every((text) => !throws(() => validateUrl(text))),
+	);
+	check(
+		"direct Google search fetches are refused before any request",
+		(await rejection(fetchUrl("https://www.google.com/search?q=x"))).includes("prohibited"),
+	);
+
 	const pdfBytes = Buffer.from("%PDF-1.7\n\x00\xff\x80\n%%EOF", "latin1");
 	const requests: string[] = [];
 	const server = createServer((request, response) => {
@@ -62,6 +99,8 @@ async function main(): Promise<void> {
 			response.writeHead(302, { location: "/page" }).end();
 		} else if (request.url === "/cross") {
 			response.writeHead(302, { location: `http://localhost:${port}/page` }).end();
+		} else if (request.url === "/google") {
+			response.writeHead(302, { location: "https://www.google.com/search?q=redirect" }).end();
 		} else if (request.url === "/pdf") {
 			response.writeHead(200, {
 				"content-type": "Application/PDF; version=1.7",
@@ -117,6 +156,13 @@ async function main(): Promise<void> {
 			"cross-origin redirects are returned without being followed",
 			cross.kind === "redirect" && cross.location === `http://localhost:${port}/page` && requests.length === before + 1,
 		);
+
+		const beforeGoogle = requests.length;
+		const googleRedirect = await rejection(fetchUrl(`http://127.0.0.1:${port}/google`, allowLoopback));
+		check(
+			"redirects to Google search are rejected after the initial request only",
+			googleRedirect.includes("prohibited") && requests.length === beforeGoogle + 1,
+		);
 	} finally {
 		server.close();
 	}
@@ -125,6 +171,8 @@ async function main(): Promise<void> {
 	web({ registerTool: (tool: { name: string }) => tools.set(tool.name, tool as never) } as unknown as ExtensionAPI);
 	const toolBlock = await rejection(tools.get(WEB_FETCH_TOOL)!.execute("call-1", { url: "http://169.254.169.254/latest/meta-data/" }));
 	check("web_fetch tool applies the default address policy", toolBlock.includes("private address"));
+	const toolGoogleBlock = await rejection(tools.get(WEB_FETCH_TOOL)!.execute("call-2", { url: "https://www.google.com/search?q=x" }));
+	check("web_fetch tool refuses Google searches", toolGoogleBlock.includes("prohibited"));
 
 	if (failures > 0) {
 		console.error(`\n${failures} check(s) failed`);

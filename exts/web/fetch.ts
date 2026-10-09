@@ -1,8 +1,8 @@
 /**
  * Anonymous GET with fixed guards: http(s) only, no URL credentials, bounded
- * URL and body sizes, no private-network addresses, and redirects followed only
- * within one origin. Other redirects are returned so the next hop passes
- * through tool-call approval.
+ * URL and body sizes, no private-network addresses, no Google search URLs, and
+ * redirects followed only within one origin. Other redirects are returned so
+ * the next hop passes through tool-call approval.
  */
 
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
@@ -70,6 +70,26 @@ export function isBlockedAddress(address: string): boolean {
 	return BLOCKED.check(address, family === 4 ? "ipv4" : "ipv6");
 }
 
+/**
+ * Google search hosts and entry paths. Automated Google searches reliably hit
+ * bot challenges, and repeated attempts can get the host IP banned, so they
+ * are refused before any network access.
+ */
+const GOOGLE_SEARCH_HOST = /^(?:www\.|encrypted\.|images\.|news\.|videos\.)?google\.[a-z]{2,}(?:\.[a-z]{2,})?$/;
+const GOOGLE_SEARCH_PATHS = new Set(["", "/", "/search", "/webhp", "/advanced_search", "/imghp", "/vidhp", "/nshp"]);
+
+/** True for Google search entry URLs. Other Google resources, such as developers.google.com or news articles, stay allowed. */
+export function isGoogleSearchUrl(url: URL): boolean {
+	if (!GOOGLE_SEARCH_HOST.test(url.hostname.replace(/\.+$/, ""))) return false;
+	let path: string;
+	try {
+		path = decodeURIComponent(url.pathname);
+	} catch {
+		path = url.pathname;
+	}
+	return GOOGLE_SEARCH_PATHS.has(path);
+}
+
 /** Parses and checks a URL, including literal IP hosts, which skip DNS lookup. */
 export function validateUrl(text: string, isBlocked = isBlockedAddress): URL {
 	if (text.length > MAX_URL_LENGTH) throw new WebFetchError(`URL exceeds ${MAX_URL_LENGTH} characters`);
@@ -83,6 +103,11 @@ export function validateUrl(text: string, isBlocked = isBlockedAddress): URL {
 		throw new WebFetchError(`unsupported URL scheme ${url.protocol}; use http or https`);
 	}
 	if (url.username || url.password) throw new WebFetchError("URLs with credentials are not allowed");
+	if (isGoogleSearchUrl(url)) {
+		throw new WebFetchError(
+			`Google search URLs are prohibited in web_fetch; use a non-Google source or search provider instead: ${url.href}`,
+		);
+	}
 	const host = url.hostname.replace(/^\[|\]$/g, "");
 	if (isIP(host) && isBlocked(host)) throw new WebFetchError(`refusing to connect to private address ${host}`);
 	return url;
@@ -222,11 +247,14 @@ export async function fetchUrl(text: string, options: FetchOptions = {}): Promis
 				} catch {
 					throw new WebFetchError(`HTTP ${response.status} redirect to an invalid URL: ${location}`);
 				}
+				// Reject prohibited targets (such as Google searches) whether the redirect
+				// would be followed or reported as cross-origin.
+				validateUrl(next.href, isBlocked);
 				if (next.origin !== url.origin && !isHttpsUpgrade(url, next)) {
 					return { kind: "redirect", url: url.href, status: response.status, location: next.href };
 				}
 				if (redirects >= MAX_REDIRECTS) throw new WebFetchError(`more than ${MAX_REDIRECTS} redirects`);
-				url = validateUrl(next.href, isBlocked);
+				url = next;
 				continue;
 			}
 
