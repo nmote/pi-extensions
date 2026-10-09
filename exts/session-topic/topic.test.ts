@@ -244,7 +244,21 @@ async function main(): Promise<void> {
 	const result = await generateTopic(model, ctx, topicInput, new AbortController().signal);
 	check("model response becomes a topic", result.topic === "Improve Pi session metadata");
 	check("model response updates cumulative work", result.workSummary === "Added cumulative summaries for completed work.");
-	check("metadata calls use low reasoning", options?.reasoning === "low");
+	check("topic metadata call omits reasoning", options !== undefined && !("reasoning" in options));
+	check(
+		"work-summary guidance uses a word target and prioritizes important work",
+		requestContext.systemPrompt.includes("aim for 100–150 words") &&
+			requestContext.systemPrompt.includes("prioritizing important tasks, decisions, and outcomes") &&
+			requestContext.systemPrompt.includes("omitting secondary details") &&
+			!requestContext.systemPrompt.includes("1200 characters"),
+	);
+	check(
+		"topic guidance retains its limits and preserves representative topics",
+		requestContext.systemPrompt.includes("contain 3 to 8 words and at most 48 characters") &&
+			requestContext.systemPrompt.includes(
+				"preserve the current topic exactly whenever it still represents the cumulative body of work",
+			),
+	);
 	check("topic model call limits output", options?.maxTokens === 4096);
 	const sentPayload = JSON.parse(requestContext?.messages?.[0]?.content?.[0]?.text) as {
 		workSinceLastSummary: TopicInput["completedWork"];
@@ -426,7 +440,14 @@ async function main(): Promise<void> {
 		new AbortController().signal,
 	);
 	check("prompt-summary response is parsed separately", summary.promptSummary === "Make topics reflect completed work");
+	check("prompt-summary metadata call omits reasoning", options !== undefined && !("reasoning" in options));
 	check("prompt-summary model call limits output", options?.maxTokens === 512);
+	check(
+		"prompt-summary guidance retains its scope and limits",
+		requestContext.systemPrompt.includes("summarize only latestPrompt as an action or request") &&
+			requestContext.systemPrompt.includes("contain at most 20 words") &&
+			requestContext.systemPrompt.includes("use one plain-text sentence"),
+	);
 	check(
 		"prompt-summary call sends its system prompt",
 		requestContext?.systemPrompt?.includes('string field named "promptSummary"') === true,

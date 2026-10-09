@@ -268,7 +268,7 @@ The work summary must:
 - describe what was actually completed, decided, diagnosed, or delivered; distinguish unsuccessful attempts
 - remain unchanged when workSinceLastSummary is empty; use an empty string when both it and the prior summary are empty
 - remain a concise plain-text record of the session's work
-- contain at most 1200 characters
+- aim for 100–150 words, prioritizing important tasks, decisions, and outcomes and omitting secondary details
 
 The topic must:
 - describe the primary throughline or best umbrella for the cumulative work summary
@@ -361,7 +361,6 @@ async function generateMetadata(
 				{
 					signal: controller.signal,
 					maxTokens,
-					reasoning: "low",
 					cacheRetention: "none",
 					sessionId: `${sessionIdPrefix}-${randomUUID()}`,
 				},
