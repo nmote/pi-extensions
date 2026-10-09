@@ -1,8 +1,10 @@
+import { readFile, rm, stat } from "node:fs/promises";
+import { dirname, isAbsolute } from "node:path";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fetchUrl, isBlockedAddress, validateUrl } from "./fetch.ts";
-import web, { WEB_FETCH_TOOL } from "./index.ts";
+import web, { savePdf, WEB_FETCH_TOOL } from "./index.ts";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {
@@ -52,6 +54,7 @@ async function main(): Promise<void> {
 			!throws(() => validateUrl("https://example.com/docs?q=1")),
 	);
 
+	const pdfBytes = Buffer.from("%PDF-1.7\n\x00\xff\x80\n%%EOF", "latin1");
 	const requests: string[] = [];
 	const server = createServer((request, response) => {
 		requests.push(request.url ?? "");
@@ -59,6 +62,11 @@ async function main(): Promise<void> {
 			response.writeHead(302, { location: "/page" }).end();
 		} else if (request.url === "/cross") {
 			response.writeHead(302, { location: `http://localhost:${port}/page` }).end();
+		} else if (request.url === "/pdf") {
+			response.writeHead(200, {
+				"content-type": "Application/PDF; version=1.7",
+				"content-disposition": 'attachment; filename="../../unsafe.pdf"',
+			}).end(pdfBytes);
 		} else {
 			response.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end("hello");
 		}
@@ -78,6 +86,30 @@ async function main(): Promise<void> {
 			"same-origin redirects are followed",
 			same.kind === "content" && same.url === `http://127.0.0.1:${port}/page` && same.text === "hello",
 		);
+
+		const pdf = await fetchUrl(`http://127.0.0.1:${port}/pdf`, { ...allowLoopback, maxBodyBytes: pdfBytes.length });
+		check("PDF at download limit returns unchanged bytes", pdf.kind === "pdf" && Buffer.from(pdf.bytes).equals(pdfBytes));
+		if (pdf.kind === "pdf") {
+			const saved = await savePdf(pdf);
+			const path = saved.details.downloadPath!;
+			try {
+				check("PDF result reports private byte-exact file with safe name",
+					isAbsolute(path) && path.endsWith("/document.pdf") &&
+					(await readFile(path)).equals(pdfBytes) &&
+					((await stat(path)).mode & 0o777) === 0o600 &&
+					((await stat(dirname(path))).mode & 0o777) === 0o700 &&
+					saved.content[0].text.includes(path) && saved.content[0].text.includes(`Bytes: ${pdfBytes.length}`) &&
+					saved.content[0].text.includes("not inspected or extracted"));
+			} finally {
+				await rm(dirname(path), { recursive: true, force: true });
+			}
+		}
+		check("oversized PDFs are rejected before saving",
+			(await rejection(fetchUrl(`http://127.0.0.1:${port}/pdf`, {
+				...allowLoopback, maxBodyBytes: pdfBytes.length - 1,
+			}))).includes("PDF exceeds download limit"));
+		const partialText = await fetchUrl(`http://127.0.0.1:${port}/page`, { ...allowLoopback, maxBodyBytes: 2 });
+		check("text downloads still return truncated text", partialText.kind === "content" && partialText.text === "he" && partialText.bodyTruncated);
 
 		const before = requests.length;
 		const cross = await fetchUrl(`http://127.0.0.1:${port}/cross`, allowLoopback);

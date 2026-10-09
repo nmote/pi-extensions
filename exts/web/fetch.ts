@@ -116,6 +116,7 @@ export interface FetchOptions {
 }
 
 export type FetchOutcome =
+	| { kind: "pdf"; url: string; status: number; contentType: string; bytes: Uint8Array }
 	| {
 			kind: "content";
 			url: string;
@@ -236,11 +237,16 @@ export async function fetchUrl(text: string, options: FetchOptions = {}): Promis
 
 			const contentType = response.headers.get("content-type") ?? "";
 			const mimeType = contentType.split(";")[0].trim().toLowerCase();
-			if (!isTextType(mimeType)) {
+			if (!isTextType(mimeType) && mimeType !== "application/pdf") {
 				await response.body?.cancel().catch(() => {});
-				throw new WebFetchError(`unsupported content type ${mimeType || "(none)"}; only text, JSON, and XML are returned`);
+				throw new WebFetchError(`unsupported content type ${mimeType || "(none)"}; only text, JSON, XML, and PDF responses are supported`);
 			}
-			const body = await readBody(response.body, options.maxBodyBytes ?? MAX_BODY_BYTES);
+			const maxBodyBytes = options.maxBodyBytes ?? MAX_BODY_BYTES;
+			const body = await readBody(response.body, maxBodyBytes);
+			if (mimeType === "application/pdf") {
+				if (body.truncated) throw new WebFetchError(`PDF exceeds download limit of ${maxBodyBytes} bytes`);
+				return { kind: "pdf", url: url.href, status: response.status, contentType, bytes: body.bytes };
+			}
 			return {
 				kind: "content",
 				url: url.href,
