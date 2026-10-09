@@ -65,6 +65,13 @@ for wrapping up, but OpenAI controls billing and credit eligibility.
 
 ## Limitations
 
+The `openai` ChatGPT login has no supported endpoint for remaining allowance or
+reset times. Its tokens target `api.openai.com/v1` and are rejected by Codex's
+usage endpoint. Subscription-sharing limits can be app-specific, so Codex quota
+is not a substitute. This provider is not polled or automatically paused/resumed;
+`/openai-limits check` explains the limitation and links to ChatGPT usage settings.
+See OpenAI's [errors and recovery guide](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+
 Automatic pausing applies in interactive and RPC sessions. One-shot print/JSON
 sessions are not automatically paused. Pi must remain open to send a continuation.
 

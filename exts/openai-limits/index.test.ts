@@ -15,7 +15,7 @@ function usage(remaining: number, at = START): UsageSnapshot {
 	return { at, limits: [{ id: "codex", windows: [{ name: "primary", usedPercent: 100 - remaining, resetAt: RESET, minutes: 300 }] }] };
 }
 
-function harness(options: { autoPause?: boolean; mode?: string } = {}) {
+function harness(options: { autoPause?: boolean; mode?: string; provider?: string } = {}) {
 	let now = START;
 	let idle = true;
 	let pending = false;
@@ -35,7 +35,10 @@ function harness(options: { autoPause?: boolean; mode?: string } = {}) {
 	const context = {
 		mode: options.mode ?? "tui",
 		hasUI: true,
-		model: { provider: "openai-codex", id: "main", baseUrl: "https://chatgpt.com/backend-api" },
+		model: {
+			provider: options.provider ?? "openai-codex", id: "main",
+			baseUrl: options.provider === "openai" ? "https://api.openai.com/v1" : "https://chatgpt.com/backend-api",
+		},
 		isIdle: () => idle,
 		hasPendingMessages: () => pending,
 		sessionManager: { getLeafId: () => leaf },
@@ -383,7 +386,7 @@ console.log("PASS: navigation, model changes, shutdown, cancellation, and queued
 	const token = `e30.${claims}.signature`;
 	let calls = 0;
 	const context = {
-		model: { baseUrl: "https://chatgpt.com/backend-api" },
+		model: { provider: "openai-codex", baseUrl: "https://chatgpt.com/backend-api" },
 		modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: token }) },
 	} as unknown as ExtensionContext;
 	const request: typeof fetch = async (url, options) => {
@@ -418,6 +421,24 @@ console.log("PASS: navigation, model changes, shutdown, cancellation, and queued
 	}
 	console.log("PASS: usage fetch guards credentials and exposes safe HTTP, network, and schema diagnostics");
 }
+
+{
+	const context = { model: { provider: "openai", baseUrl: "https://api.openai.com/v1" } } as unknown as ExtensionContext;
+	await assert.rejects(fetchUsage(context, new AbortController().signal, async () => {
+		assert.fail("OpenAI tokens must not be sent to WHAM");
+	}), /no supported quota endpoint/);
+	const h = harness({ provider: "openai" });
+	await h.start();
+	await h.run();
+	assert.equal(h.status, undefined);
+	assert.equal(h.requests, 0);
+	assert.equal(h.messages.length, 0);
+	await h.command("check");
+	assert.match(h.notifications.at(-1)!, /no supported quota endpoint/);
+	assert.match(h.notifications.at(-1)!, /https:\/\/chatgpt.com\/settings\/usage/);
+	await h.emit("session_shutdown");
+}
+console.log("PASS: OpenAI quota is unavailable without credential resolution, polling, or automatic pausing");
 
 {
 	const h = harness({ mode: "print" });

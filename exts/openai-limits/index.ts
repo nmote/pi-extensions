@@ -25,9 +25,16 @@ export interface LimitsDependencies {
 
 export class UsageCheckError extends Error {}
 
+// `openai` ChatGPT tokens target api.openai.com/v1 and cannot query Codex WHAM.
+// No supported quota endpoint exposes remaining allowance or reset times for them.
+// Subscription-sharing limits can be app-specific, so Codex quota is not a substitute.
+// See https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery
+const OPENAI_UNSUPPORTED = "OpenAI ChatGPT login has no supported quota endpoint; remaining allowance, reset times, and automatic resumption are unavailable. Manage usage at https://chatgpt.com/settings/usage.";
+
 export async function fetchUsage(ctx: ExtensionContext, signal: AbortSignal, fetchRequest: typeof fetch = fetch): Promise<UsageSnapshot> {
 	const model = ctx.model;
 	if (!model) throw new UsageCheckError("No model selected");
+	if (model.provider === "openai") throw new UsageCheckError(OPENAI_UNSUPPORTED);
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model).catch(() => {
 		throw new UsageCheckError("OpenAI authentication refresh failed; try /login openai-codex.");
 	});
@@ -385,7 +392,8 @@ export function registerOpenAILimits(pi: ExtensionAPI, dependencies: Partial<Lim
 			if (ctx && (action === "" || action === "check")) await refresh();
 			render();
 			const lines = [`Automatic pausing: ${config.autoPause ? "on" : "off"} (at ${config.pauseAtPercent}% remaining)`];
-			if (!ctx) lines.push("Select an openai-codex model on chatgpt.com to monitor subscription usage.");
+			if (!ctx) lines.push(context.model?.provider === "openai" ? OPENAI_UNSUPPORTED
+				: "Select an openai-codex model on chatgpt.com to monitor subscription usage.");
 			else {
 				lines.push(`Status: ${phase}${unavailable ? snapshot ? " · cached usage (refresh unavailable)" : " · usage unavailable" : ""}`);
 				if (failure) lines.push(`Check failed: ${failure}`);
