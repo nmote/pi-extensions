@@ -336,6 +336,51 @@ export function isPathWithinRoots(
 }
 
 /**
+ * Where the call's `path` resolves through symlinks, when that differs from its
+ * lexical path. Omits the untrusted literal path since this is trusted text.
+ * `realPath` resolves absolute paths and returns undefined when unresolvable.
+ */
+export function symlinkNote(
+	input: MatchInput,
+	cwd: string,
+	homeDir: string,
+	realPath: (abs: string) => string | undefined,
+): string | undefined {
+	if (typeof input.raw.path !== "string") return undefined;
+	const abs = absoluteToolPath(input.raw.path, cwd, homeDir);
+	if (abs === undefined) return undefined;
+	const real = realPath(abs);
+	if (real === abs) return undefined;
+	return real === undefined
+		? "the tool call's `path` could not be resolved through symlinks"
+		: `the tool call's \`path\` resolves through symlinks to \`${real}\``;
+}
+
+/** Inputs to evaluator prompt construction, injected so replay needs no filesystem or live config. */
+export interface EvaluatorInstructionScope {
+	/** Raw configured write roots; relative and `~` forms resolve against cwd. */
+	writeRoots: string[];
+	/** Complete read-root list: skills dir, install-doc roots, then raw configured read roots. */
+	readRoots: string[];
+	/** Instructions from context rules matched to this call, in config order. */
+	matchedInstructions: string[];
+	homeDir: string;
+	/** Symlink resolver for absolute paths; undefined marks unresolvable. */
+	realPath: (abs: string) => string | undefined;
+}
+
+/** Trusted evaluator instructions: the path scope, matched context instructions, then any symlink note. */
+export function evaluatorInstructions(input: MatchInput, cwd: string, scope: EvaluatorInstructionScope): string[] {
+	const instruction = scopeInstruction(cwd, scope.writeRoots, scope.readRoots, scope.homeDir);
+	const note = symlinkNote(input, cwd, scope.homeDir, scope.realPath);
+	return [
+		...(instruction ? [instruction] : []),
+		...scope.matchedInstructions,
+		...(note ? [`Note: ${note}.`] : []),
+	];
+}
+
+/**
  * Trusted evaluator instruction naming the automatic path scope, or undefined
  * when that scope is only the working directory. Relative configured roots
  * resolve against cwd, as in the gate.

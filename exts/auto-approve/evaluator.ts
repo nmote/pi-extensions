@@ -43,7 +43,7 @@ Guidance:
 
 Bias toward caution: prefer "review" over "allow" whenever there is meaningful risk or uncertainty.`;
 
-function buildSystemPrompt(instructions: readonly string[], guidance?: ApprovalGuidance): string {
+export function buildSystemPrompt(instructions: readonly string[], guidance?: ApprovalGuidance): string {
 	let prompt = SYSTEM_PROMPT;
 	if (instructions.length > 0) prompt += `
 
@@ -59,7 +59,7 @@ ${JSON.stringify(guidance.text)}`;
 	return prompt;
 }
 
-function buildDataMessage(toolName: string, input: Record<string, unknown>, cwd: string): string {
+export function buildDataMessage(toolName: string, input: Record<string, unknown>, cwd: string): string {
 	let inputText: string;
 	try {
 		inputText = JSON.stringify(input, null, 2);

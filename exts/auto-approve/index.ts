@@ -49,6 +49,7 @@ import { type AutoApproveConfig, EFFORTS, isEffort, isMode, loadConfig, type Mod
 import {
 	absoluteToolPath,
 	buildMatchInput,
+	evaluatorInstructions,
 	exactCallSignature,
 	isAgentSkillRead,
 	isPathWithinRoots,
@@ -57,7 +58,7 @@ import {
 	matchesAny,
 	matchesAnyDeny,
 	matchingInstructions,
-	scopeInstruction,
+	symlinkNote,
 } from "./rules.ts";
 import { evaluateSafety } from "./evaluator.ts";
 import { realPathOf } from "./realpath.ts";
@@ -348,34 +349,17 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		return abs === undefined ? undefined : { abs, real: realPathOf(abs) };
 	}
 
-	/**
-	 * Where the call's `path` resolves through symlinks, when that differs from
-	 * its lexical path. Omits the untrusted literal path since this is trusted text.
-	 */
-	function symlinkNote(input: MatchInput, cwd: string): string | undefined {
-		const paths = toolPaths(input.raw.path, cwd);
-		if (!paths || paths.real === paths.abs) return undefined;
-		return paths.real === undefined
-			? "the tool call's `path` could not be resolved through symlinks"
-			: `the tool call's \`path\` resolves through symlinks to \`${paths.real}\``;
-	}
-
 	/** Trusted evaluator instructions: the path scope, matching context rules, then any symlink note. */
-	function evaluatorInstructions(input: MatchInput, cwd: string): string[] {
+	function instructionList(input: MatchInput, cwd: string): string[] {
 		// The skills and installed-doc roots are read-only here so bash can inspect
 		// what the read tool may.
-		const scope = scopeInstruction(
-			cwd,
-			config.writeRoots,
-			[skillsDir, ...installDocRoots, ...config.readRoots],
+		return evaluatorInstructions(input, cwd, {
+			writeRoots: config.writeRoots,
+			readRoots: [skillsDir, ...installDocRoots, ...config.readRoots],
+			matchedInstructions: matchingInstructions(config.context, input),
 			homeDir,
-		);
-		const note = symlinkNote(input, cwd);
-		return [
-			...(scope ? [scope] : []),
-			...matchingInstructions(config.context, input),
-			...(note ? [`Note: ${note}.`] : []),
-		];
+			realPath: realPathOf,
+		});
 	}
 
 	function approvalKey(toolName: string, input: Record<string, unknown>, cwd: string): string | undefined {
@@ -606,7 +590,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		if (mode === "yolo") return undefined;
 
 		if (mode === "manual") {
-			const note = symlinkNote(input, ctx.cwd);
+			const note = symlinkNote(input, ctx.cwd, homeDir, realPathOf);
 			const decision = await ask(ctx, toolName, input, key, `not in allow/deny list${note ? `; ${note}` : ""}`);
 			if (!decision) lockToolInput(event);
 			return decision;
@@ -616,7 +600,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		try {
 			for (let attempt = 0; attempt < 3; attempt++) {
 				const policy = await exchangeGuidance({ action: "get" }, ctx);
-				const instructions = evaluatorInstructions(input, ctx.cwd);
+				const instructions = instructionList(input, ctx.cwd);
 				const effort = config.evaluator.reasoningEffort;
 				let result = config.evaluator.memoize ? evaluatorCache.get(input, instructions, policy) : undefined;
 				const cached = !!result;
@@ -760,7 +744,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
 					return;
 				}
-				const instructions = evaluatorInstructions(buildMatchInput(call.toolName, call.input), ctx.cwd);
+				const instructions = instructionList(buildMatchInput(call.toolName, call.input), ctx.cwd);
 				ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 				let result: Awaited<ReturnType<typeof evaluateSafety>>;
 				try {

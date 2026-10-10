@@ -6,6 +6,7 @@
 
 import {
 	buildMatchInput,
+	evaluatorInstructions,
 	exactCallSignature,
 	hasShellOperators,
 	isAgentSkillRead,
@@ -16,6 +17,7 @@ import {
 	matchingInstructions,
 	scopeInstruction,
 	signatureOf,
+	symlinkNote,
 } from "./rules.ts";
 import type { ContextRule, Matcher } from "./config.ts";
 
@@ -213,6 +215,39 @@ check(
 );
 check("exact signature rejects bigint values", exactCallSignature("custom", { value: 1n }, cwd) === undefined);
 check("exact signature rejects undefined values", exactCallSignature("custom", { value: undefined }, cwd) === undefined);
+
+// Evaluator instruction assembly (pure seam: injected roots, home, and symlink resolver)
+const realPaths: Record<string, string | null> = { [`${cwd}/src/linked.ts`]: "/pool/src/linked.ts" };
+check(
+	"evaluator instructions order: scope, matched instructions, symlink note",
+	JSON.stringify(
+		evaluatorInstructions(buildMatchInput("read", { path: "src/linked.ts" }), cwd, {
+			writeRoots: [],
+			readRoots: ["/pool/docs"],
+			matchedInstructions: ["matched guidance"],
+			homeDir: home,
+			realPath: (abs: string) => realPaths[abs] ?? abs,
+		}),
+	) ===
+		JSON.stringify([
+			scopeInstruction(cwd, [], ["/pool/docs"], home),
+			"matched guidance",
+			`Note: the tool call's \`path\` resolves through symlinks to \`/pool/src/linked.ts\`.`,
+		]),
+);
+check(
+	"symlink note omitted when the resolved path matches",
+	symlinkNote(buildMatchInput("read", { path: "src/a.ts" }), cwd, home, (abs: string) => abs) === undefined,
+);
+check(
+	"symlink note reports an unresolvable path",
+	symlinkNote(buildMatchInput("read", { path: "src/dangling.ts" }), cwd, home, () => undefined) ===
+		"the tool call's `path` could not be resolved through symlinks",
+);
+check(
+	"symlink note omitted without a path input",
+	symlinkNote(bash("ls"), cwd, home, () => undefined) === undefined,
+);
 
 if (failures > 0) {
 	console.error(`\n${failures} check(s) failed`);
