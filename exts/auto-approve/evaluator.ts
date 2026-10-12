@@ -13,13 +13,29 @@
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { EvaluatorConfig } from "./config.ts";
 import type { ApprovalGuidance } from "../shared/approval-guidance.ts";
 
 export type Verdict = "allow" | "review";
 
+export interface EvaluationAttempt {
+	failure?: "timeout" | "parse" | "non-stop" | "error" | "cancelled";
+	stopReason: string | null;
+	usage: AssistantMessage["usage"] | null;
+	responseModel: string | null;
+	providerThinkingLevel: string | null;
+}
+
+export interface EvaluatorContext {
+	cwd: string;
+	signal?: AbortSignal;
+	modelRegistry: Pick<ExtensionContext["modelRegistry"], "streamSimple">;
+}
+
 export interface EvaluationResult {
+	/** Request metadata only; never contains prompt or response bodies. */
+	attempt?: EvaluationAttempt;
 	decision: Verdict;
 	reason: string;
 	/** False for synthetic fallback results caused by evaluator failure. */
@@ -95,7 +111,7 @@ function parseVerdict(text: string): EvaluationResult | undefined {
 
 export async function evaluateSafety(
 	model: Model<any>,
-	ctx: ExtensionContext,
+	ctx: EvaluatorContext,
 	toolName: string,
 	input: Record<string, unknown>,
 	config: EvaluatorConfig,
@@ -103,11 +119,23 @@ export async function evaluateSafety(
 	guidance?: ApprovalGuidance,
 ): Promise<EvaluationResult> {
 	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
-	const onOuterAbort = () => controller.abort();
+	let abortKind: "timeout" | "cancelled" | undefined;
+	const abort = (kind: "timeout" | "cancelled") => {
+		if (!controller.signal.aborted) {
+			abortKind = kind;
+			controller.abort();
+		}
+	};
+	const timeout = setTimeout(() => abort("timeout"), config.timeoutMs);
+	const onOuterAbort = () => abort("cancelled");
 	ctx.signal?.addEventListener("abort", onOuterAbort, { once: true });
+	if (ctx.signal?.aborted) onOuterAbort();
+	let attempt: EvaluationAttempt = {
+		stopReason: null, usage: null, responseModel: null, providerThinkingLevel: null,
+	};
 
 	try {
+		if (controller.signal.aborted) throw new Error("evaluation cancelled");
 		// streamSimple maps `reasoning` to each provider's option; complete() ignores it.
 		const response = await ctx.modelRegistry
 			.streamSimple(
@@ -131,11 +159,19 @@ export async function evaluateSafety(
 			)
 			.result();
 
+		attempt = {
+			stopReason: response.stopReason,
+			usage: response.usage ?? null,
+			responseModel: response.responseModel ?? null,
+			providerThinkingLevel: response.providerThinkingLevel ?? null,
+		};
+		if (controller.signal.aborted) throw new Error("evaluation aborted");
 		if (response.stopReason !== "stop") {
 			return {
 				decision: "review",
 				reason: `evaluator stopped with ${response.stopReason}`,
 				cacheable: false,
+				attempt: { ...attempt, failure: "non-stop" },
 			};
 		}
 
@@ -146,15 +182,19 @@ export async function evaluateSafety(
 
 		const verdict = parseVerdict(text);
 		if (!verdict) {
-			return { decision: "review", reason: "evaluator returned an unparseable response", cacheable: false };
+			return {
+				decision: "review", reason: "evaluator returned an unparseable response", cacheable: false,
+				attempt: { ...attempt, failure: "parse" },
+			};
 		}
-		return verdict;
+		return { ...verdict, attempt };
 	} catch (e) {
 		const aborted = controller.signal.aborted;
 		return {
 			decision: "review",
 			reason: aborted ? "evaluation timed out or was cancelled" : `evaluation failed: ${e instanceof Error ? e.message : e}`,
 			cacheable: false,
+			attempt: { ...attempt, failure: abortKind ?? "error" },
 		};
 	} finally {
 		clearTimeout(timeout);

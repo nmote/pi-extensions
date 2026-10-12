@@ -1,0 +1,77 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { main } from "./run.ts";
+import { isRunResult } from "./contracts.ts";
+
+const directory = await mkdtemp(join(tmpdir(), "pi-benchmark-"));
+const output = join(directory, "result.json");
+const originalCreate = ModelRuntime.create;
+const originalWrite = process.stdout.write;
+let stdout = "";
+process.stdout.write = ((chunk: string | Uint8Array) => {
+	stdout += chunk.toString();
+	return true;
+}) as typeof process.stdout.write;
+let initialized = 0;
+let requests = 0;
+const model = { id: "offline", provider: "offline", api: "offline", reasoning: false,
+	input: ["text"], contextWindow: 1000, maxTokens: 100,
+	cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
+		tiers: [{ inputTokensAbove: 10, input: 2, output: 4, cacheRead: 0, cacheWrite: 0 }] } };
+ModelRuntime.create = async (options) => {
+	initialized++;
+	assert.equal(options?.modelsPath, null);
+	assert.equal(options?.refreshOnCreate, false);
+	assert.equal(options?.allowModelNetwork, false);
+	return { getPhysicalModel: () => model,
+		streamSimple: () => ({ result: async () => {
+			requests++;
+			return { stopReason: "stop", content: [{ type: "text", text: '{"decision":"allow","reason":"offline fixture"}' }],
+				usage: { input: 20, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 21 } };
+		} }),
+	} as unknown as ModelRuntime;
+};
+const logDir = join(directory, "logs");
+const args = ["--provider", "offline", "--model", "offline", "--log-dir", logDir];
+try {
+	const invalid = join(directory, "invalid.jsonl");
+	await writeFile(invalid, "{}\n");
+	await assert.rejects(main([...args, "--cases", invalid]), /case schema/);
+	assert.equal(initialized, 0);
+	const dangling = join(directory, "dangling");
+	await symlink(join(directory, "missing"), dangling);
+	await assert.rejects(main([...args, "--output", dangling]), /already exists/);
+	assert.equal(initialized, 0);
+	assert.equal(await main([...args, "--output", output]), 0);
+	const report: unknown = JSON.parse(await readFile(output, "utf8"));
+	assert.ok(isRunResult(report));
+	assert.equal(report.aggregates.planned, report.datasetIdentity.count * 3);
+	assert.equal(requests, report.aggregates.planned);
+	assert.equal(initialized, 1);
+	assert.deepEqual(report.modelIdentity.pricing.tiers, model.cost.tiers);
+	assert.equal(report.outcomes[0].estimatedCostUsd, 0.000044);
+	assert.equal(report.aggregates.consistency.unanimous, report.datasetIdentity.count);
+	assert.match(stdout, /Pooled scores/);
+	assert.doesNotMatch(stdout, /offline fixture|#1|"schemaVersion"/);
+	const runs = await readdir(logDir);
+	assert.equal(runs.length, 1);
+	const loggedJson = await readFile(join(logDir, runs[0], "results.json"), "utf8");
+	assert.deepEqual(JSON.parse(loggedJson), report);
+	const full = await readFile(join(logDir, runs[0], "report.txt"), "utf8");
+	assert.match(full, /#1 allow: "offline fixture"/);
+	assert.match(full, /Pooled scores/);
+	await assert.rejects(main([...args, "--output", output]), /already exists/);
+	assert.equal(initialized, 1);
+	stdout = "";
+	assert.equal(await main([...args, "--json", "--repetitions", "1"]), 0);
+	assert.ok(isRunResult(JSON.parse(stdout)));
+	assert.equal((await readdir(logDir)).length, 2);
+} finally {
+	ModelRuntime.create = originalCreate;
+	process.stdout.write = originalWrite;
+	await rm(directory, { recursive: true, force: true });
+}
+console.log("CLI preflight and offline report checks passed");

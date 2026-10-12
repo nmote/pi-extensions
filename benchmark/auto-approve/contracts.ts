@@ -226,26 +226,54 @@ export function sparseRealPath(realPaths: Record<string, string | null>): (abs: 
 const count = Type.Number({ minimum: 0 });
 const rate = Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()]);
 
-const usageSchema = Type.Object(
+const nullableCount = Type.Union([count, Type.Null()]);
+const nullableString = Type.Union([Type.String(), Type.Null()]);
+
+export const tokenUsageSchema = Type.Object(
 	{
-		input: count,
-		output: count,
-		cacheRead: count,
-		cacheWrite: count,
-		totalTokens: count,
-		cost: Type.Object(
-			{ input: count, output: count, cacheRead: count, cacheWrite: count, total: count },
-			{ additionalProperties: false },
-		),
+		input: nullableCount,
+		output: nullableCount,
+		cacheRead: nullableCount,
+		cacheWrite: nullableCount,
+		totalTokens: nullableCount,
 	},
 	{ additionalProperties: false },
 );
+export type TokenUsage = Static<typeof tokenUsageSchema>;
+
+export const modelIdentitySchema = Type.Object(
+	{
+		piCodingAgentVersion: Type.String({ minLength: 1 }),
+		piAiVersion: Type.String({ minLength: 1 }),
+		api: Type.String({ minLength: 1 }),
+		reasoning: Type.Boolean(),
+		input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])),
+		contextWindow: count,
+		maxTokens: count,
+		/** Catalog rates in USD per million tokens; all-zero rates mean unknown pricing. */
+		pricing: Type.Object(
+			{
+				input: count, output: count, cacheRead: count, cacheWrite: count,
+				tiers: Type.Optional(Type.Array(Type.Object(
+					{ inputTokensAbove: count, input: count, output: count, cacheRead: count, cacheWrite: count },
+					{ additionalProperties: false },
+				))),
+			},
+			{ additionalProperties: false },
+		),
+		catalogHash: Type.String({ minLength: 1 }),
+	},
+	{ additionalProperties: false },
+);
+export type ModelIdentity = Static<typeof modelIdentitySchema>;
 
 /**
  * Distinct evaluator failure kinds. Failures are not model review judgments
  * and are excluded from verdict-metric denominators.
  */
-export const failureKindSchema = Type.Union(["timeout", "parse", "non-stop", "error"].map((kind) => Type.Literal(kind)));
+export const failureKindSchema = Type.Union([
+	Type.Literal("timeout"), Type.Literal("parse"), Type.Literal("non-stop"), Type.Literal("error"),
+]);
 export type FailureKind = Static<typeof failureKindSchema>;
 
 /** One case × one repetition. */
@@ -253,6 +281,12 @@ export const outcomeSchema = Type.Object(
 	{
 		caseId: Type.String({ minLength: 1 }),
 		repetition: Type.Integer({ minimum: 1 }),
+		elapsedMs: count,
+		usage: Type.Union([tokenUsageSchema, Type.Null()]),
+		estimatedCostUsd: nullableCount,
+		responseModel: nullableString,
+		providerThinkingLevel: nullableString,
+		stopReason: nullableString,
 		result: Type.Union([
 			Type.Object(
 				{
@@ -314,6 +348,7 @@ export const runResultSchema = Type.Object(
 		),
 		provider: Type.String({ minLength: 1 }),
 		model: Type.String({ minLength: 1 }),
+		modelIdentity: modelIdentitySchema,
 		effort: effortSchema,
 		timeoutMs: Type.Number({ exclusiveMinimum: 0 }),
 		repetitions: Type.Integer({ minimum: 1 }),
@@ -327,6 +362,9 @@ export const runResultSchema = Type.Object(
 				safeCaseReviews: count,
 				completed: count,
 				failed: count,
+				planned: count,
+				attempted: count,
+				valid: count,
 				completionRate: rate,
 				baselines: Type.Object(
 					{
@@ -335,9 +373,9 @@ export const runResultSchema = Type.Object(
 					},
 					{ additionalProperties: false },
 				),
-				/** Cases with all-valid verdicts unanimous vs mixed; cases with any failure tracked separately. */
+				/** Agreement among valid verdicts; failures are an independent case count. */
 				consistency: Type.Object(
-					{ unanimous: count, mixed: count, withFailures: count },
+					{ insufficient: count, unanimous: count, mixed: count, withFailures: count },
 					{ additionalProperties: false },
 				),
 				/** True when every case × repetition has an outcome. */
@@ -347,8 +385,23 @@ export const runResultSchema = Type.Object(
 		),
 		usage: Type.Object(
 			{
-				total: usageSchema,
-				averagePerAttempt: usageSchema,
+				/** Each token total is null if any attempt lacks that count. */
+				total: tokenUsageSchema,
+				usageAttempts: count,
+				pricedAttempts: count,
+				knownCostSubtotalUsd: count,
+				totalEstimatedCostUsd: nullableCount,
+				averageEstimatedCostUsd: nullableCount,
+			},
+			{ additionalProperties: false },
+		),
+		latency: Type.Object(
+			{
+				attempts: count,
+				totalMs: count,
+				averageMs: nullableCount,
+				minMs: nullableCount,
+				maxMs: nullableCount,
 			},
 			{ additionalProperties: false },
 		),

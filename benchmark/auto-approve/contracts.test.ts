@@ -209,7 +209,6 @@ check("rejects an unknown log status", !isEvalLogRecord({ ...logRecord, status: 
 
 const zeroUsage = {
 	input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 const metrics = { tp: 0, fp: 0, tn: 0, fn: 0, precision: null, recall: null, f2: null, safeCaseAllowRate: null };
 const runResult = {
@@ -218,26 +217,69 @@ const runResult = {
 	evaluatorPolicyIdentity: { extensionVersion: "0.1.0", sourcesHash: "def", substitution: "fictional-install-v1" },
 	provider: "p",
 	model: "m",
+	modelIdentity: {
+		piCodingAgentVersion: "1.1.0", piAiVersion: "1.1.0", api: "test-api",
+		reasoning: true, input: ["text"], contextWindow: 10000, maxTokens: 1000,
+		pricing: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 }, catalogHash: "catalog",
+	},
 	effort: "low",
 	timeoutMs: 1000,
 	repetitions: 1,
 	startedAt: 0,
 	finishedAt: 1,
-	outcomes: [{ caseId: "c1", repetition: 1, result: { kind: "verdict", verdict: "review", reason: "risky" } }],
+	outcomes: [{
+		caseId: "c1", repetition: 1, result: { kind: "verdict", verdict: "review", reason: "risky" },
+		elapsedMs: 1, usage: zeroUsage, estimatedCostUsd: 0,
+		responseModel: null, providerThinkingLevel: null, stopReason: "stop",
+	}],
 	aggregates: {
 		...metrics,
 		safeCaseAllows: 0,
 		safeCaseReviews: 0,
 		completed: 0,
 		failed: 0,
+		planned: 1,
+		attempted: 1,
+		valid: 1,
 		completionRate: null,
 		baselines: { alwaysReview: metrics, alwaysAllow: metrics },
-		consistency: { unanimous: 0, mixed: 0, withFailures: 0 },
+		consistency: { insufficient: 1, unanimous: 0, mixed: 0, withFailures: 0 },
 		complete: false,
 	},
-	usage: { total: zeroUsage, averagePerAttempt: zeroUsage },
+	usage: {
+		total: zeroUsage, usageAttempts: 1, pricedAttempts: 1,
+		knownCostSubtotalUsd: 0, totalEstimatedCostUsd: 0, averageEstimatedCostUsd: 0,
+	},
+	latency: { attempts: 1, totalMs: 1, averageMs: 1, minMs: 1, maxMs: 1 },
 };
 check("accepts a valid run result", isRunResult(runResult));
+const unknownAttempt = {
+	...runResult.outcomes[0], usage: { input: null, output: 2, cacheRead: null, cacheWrite: null, totalTokens: null },
+	estimatedCostUsd: null, responseModel: null, providerThinkingLevel: null, stopReason: null,
+};
+check("accepts partial token usage and unknown metadata", isRunResult({ ...runResult, outcomes: [unknownAttempt] }));
+check("accepts absent usage", isRunResult({ ...runResult, outcomes: [{ ...unknownAttempt, usage: null }] }));
+check("rejects Pi-calculated cost in token usage", !isRunResult({
+	...runResult, outcomes: [{ ...unknownAttempt, usage: { ...zeroUsage, cost: { total: 0 } } }],
+}));
+check("rejects negative latency", !isRunResult({ ...runResult, outcomes: [{ ...unknownAttempt, elapsedMs: -1 }] }));
+check("requires model identity", !isRunResult({ ...runResult, modelIdentity: undefined }));
+const tieredIdentity = {
+	...runResult.modelIdentity,
+	pricing: {
+		...runResult.modelIdentity.pricing,
+		tiers: [{ inputTokensAbove: 100, input: 2, output: 4, cacheRead: 0.2, cacheWrite: 2 }],
+	},
+};
+check("accepts tiered catalog pricing", isRunResult({ ...runResult, modelIdentity: tieredIdentity }));
+check("rejects negative pricing threshold", !isRunResult({
+	...runResult, modelIdentity: { ...tieredIdentity, pricing: { ...tieredIdentity.pricing, tiers: [{
+		...tieredIdentity.pricing.tiers[0], inputTokensAbove: -1,
+	}] } },
+}));
+check("requires complete tier rate cards", !isRunResult({
+	...runResult, modelIdentity: { ...tieredIdentity, pricing: { ...tieredIdentity.pricing, tiers: [{ inputTokensAbove: 100 }] } },
+}));
 const failedRun = JSON.parse(JSON.stringify(runResult));
 failedRun.outcomes[0].result = { kind: "failure", failure: "crash", detail: "boom" };
 check("rejects an unknown failure kind", !isRunResult(failedRun));
