@@ -704,6 +704,31 @@ async function main(): Promise<void> {
 				loggedRecords[0].guidance === null,
 		);
 
+		const installRoots = [join(temp, "skills"), getReadmePath(), getDocsPath(), getExamplesPath(), join(getPackageDir(), "CHANGELOG.md")];
+		check(
+			"no-preset logs omit install roots without adding preset permissions",
+			JSON.stringify(loggedRecords[0].structuredContext) === JSON.stringify({
+				writeRoots: [], readRoots: [],
+				instructions: [scopeInstruction("/workspace", [], installRoots, homedir())],
+			}),
+		);
+		writeFileSync(configFile, JSON.stringify({
+			defaultMode: "auto", logEvaluations: true,
+			writeRoots: ["/tmp", getDocsPath(), "../extra-write"],
+			readRoots: [...installRoots, "/tmp", "../extra-read"],
+		}));
+		await handlers.get("session_start")?.[0]?.({}, ctx);
+		await gate({ toolName: "bash", input: { command: "logged-extra-roots" } }, ctx);
+		const rootRecord = JSON.parse(readFileSync(logFile, "utf8").trim().split("\n").at(-1)!);
+		check(
+			"logging subtracts exact builtin grants and preserves full instructions",
+			JSON.stringify(rootRecord.structuredContext) === JSON.stringify({
+				writeRoots: [getDocsPath(), "../extra-write"], readRoots: ["../extra-read"],
+				instructions: [scopeInstruction("/workspace", ["/tmp", getDocsPath(), "../extra-write"],
+					[...installRoots, ...installRoots, "/tmp", "../extra-read"], homedir())],
+			}),
+		);
+
 		let mutateGuidance = true;
 		onEvaluate = () => {
 			if (!mutateGuidance) return;

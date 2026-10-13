@@ -297,7 +297,7 @@ export function isVersionControlMetadataPath(targetPath: string, executionCwd: s
 		.some((component) => component === ".git" || component === ".hg");
 }
 
-function resolveRoot(root: string, base: string, homeDir?: string): string {
+export function resolveRoot(root: string, base: string, homeDir?: string): string {
 	const expanded = expandHomePath(root, homeDir);
 	return isAbsolute(expanded) ? resolve(expanded) : resolve(base, expanded);
 }

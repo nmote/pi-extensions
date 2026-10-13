@@ -11,6 +11,7 @@ import { buildMatchInput, evaluatorInstructions } from "../../exts/auto-approve/
 import {
 	CASE_SCHEMA_VERSION,
 	FICTIONAL_INSTALL,
+	INSTALL_READ_ROOTS,
 	RUN_RESULT_SCHEMA_VERSION,
 	isRunResult,
 	loadCases,
@@ -121,6 +122,26 @@ check(
 		caseLine({ tool: "read", input: { offset: 1, path: "/home/dev/work/webapp/src/index.ts" }, id: "c2", pairWith: "c1" }),
 	].join("\n")) !== undefined,
 );
+
+// Supplemental roots preserve permission differences and reject lexical duplicates.
+for (const root of ["/tmp", "/tmp/", "../../../../tmp", "~/../../../tmp"]) {
+	for (const field of ["writeRoots", "readRoots"]) {
+		rejects(`redundant ${field} alias ${root}`, [caseLine({ [field]: [root] })],
+			`case c1: ${field} contains redundant builtin root: ${root}`);
+	}
+}
+for (const root of [...INSTALL_READ_ROOTS, "/home/dev/.pi/agent/docs/", "../../.pi/agent/docs", "~/.pi/agent/docs/"]) {
+	rejects(`redundant install read root ${root}`, [caseLine({ readRoots: [root] })],
+		`case c1: readRoots contains redundant builtin root: ${root}`);
+}
+check("write override of builtin read-only root loads", loadCases(caseLine({
+	writeRoots: ["~/.pi/agent/docs/"],
+})).length === 1);
+check("parent and child overlaps and symlink aliases load", loadCases(caseLine({
+	writeRoots: ["/tmp/scratch"],
+	readRoots: ["/home/dev/.pi/agent", "~/.pi/agent/docs/topic", "/scratch-link"],
+	realPaths: { "/scratch-link": "/tmp" },
+})).length === 1);
 
 // Sparse symlink resolution
 const resolve = sparseRealPath({

@@ -42,7 +42,12 @@ export const evalLogRecordSchema = Type.Object(
 		tool: Type.String({ minLength: 1 }),
 		input: Type.Record(Type.String(), Type.Unknown()),
 		cwd: Type.String({ minLength: 1 }),
-		/** The roots and instruction list actually passed to the evaluator. */
+		/**
+		 * Roots supplemental to installation/preset grants; instructions retain
+		 * the full evaluated context. Schema 1 also covers older full-root logs.
+		 * Only exact raw-string builtin duplicates are omitted; roots alone do
+		 * not capture historical scope or whether builtin:defaults was imported.
+		 */
 		structuredContext: Type.Object(
 			{
 				writeRoots: Type.Array(Type.String()),

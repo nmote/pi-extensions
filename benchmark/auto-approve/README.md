@@ -79,8 +79,17 @@ policy, home directory, or live session state. `home` is `/home/dev`, and the
 runner maps every installation root the extension reads onto
 `FICTIONAL_INSTALL` (agent dir `/home/dev/.pi/agent`, skills dir
 `/home/dev/.pi/agent/skills`, plus fictional README/docs/examples/CHANGELOG
-paths), identified by `SUBSTITUTION_ID`. Runs are deterministic in their
-inputs; the model is not.
+paths), identified by `SUBSTITUTION_ID` (`fictional-install-v2`). The runner
+supplies the five fictional skills/install-doc read roots and the bundled
+`exts/auto-approve/defaults.json` preset's read/write roots. The whole agent
+directory is not a builtin read grant. Runs are deterministic in their inputs;
+the model is not.
+
+This baseline assumes `builtin:defaults`, which production configuration may
+omit. Logs do not record whether that preset was imported; supplemental roots
+alone do not establish faithful historical scope. Curation must exclude cases
+with uncertain scope or disclose a synthetic baseline adaptation for individual
+case approval.
 
 ## Case format
 
@@ -89,9 +98,13 @@ Fields per `caseSchema`:
 - `id` — stable identifier; never reuse an id after changing a case's meaning
 - `tool`, `input` — the call under test
 - `cwd`, `home` — fictional absolute paths
-- `writeRoots`, `readRoots` — raw as configured; relative and `~` forms resolve
-  against the case `cwd`/`home` at run time, exactly as in production (that
-  normalization is behavior under test)
+- `writeRoots`, `readRoots` — supplemental to the builtin baseline, raw as
+  configured; relative and `~` forms resolve against the case `cwd`/`home` at
+  run time, exactly as in production (that normalization is behavior under test).
+  Validation rejects lexical equivalents of builtin grants: write roots cannot
+  repeat builtin write grants; read roots cannot repeat builtin read/write
+  grants. Extra write permission for a builtin read-only root is valid, as are
+  parent/child overlaps; symlink equivalence is not inferred.
 - `matchedRules` — context rules matched at curation time, instructions as
   data; the runner passes them verbatim and never recomputes the match
 - `realPaths` — sparse symlink facts; `null` marks an unresolvable path
@@ -105,7 +118,15 @@ Matching happens at curation time (curation skill or logging) with live
 config. Consequently context-rule matching is outside benchmark coverage:
 runs are stable across matching-logic changes, but matching regressions are
 invisible to the runner. The scope instruction is still rebuilt at run time
-from the case roots, so prompt construction stays under test.
+from the builtin baseline plus case roots, so prompt construction stays under
+test.
+
+Private eval logs keep `schemaVersion: 1`: older records contain full effective
+roots; newer records may contain only supplemental roots, omitting exact
+raw-string builtin duplicates. Equivalent aliases still require normalization
+during curation. `structuredContext.instructions` retains the full evaluated
+instruction list, not just matched rules. Root arrays alone are not a complete
+historical-scope record.
 
 ### realPaths resolution
 
@@ -149,11 +170,14 @@ review-positive (`tp` = expected review, verdict review). Zero denominators
 yield `null` metrics with the explicit counts retained. `safeCaseAllowRate`
 covers expected-`allow` cases; `completionRate` is reported separately from
 verdict metrics. `evaluatorPolicyIdentity` pins the extension version, a
-hash of every `.ts` source under `exts/auto-approve/`, and the substitution
-scheme, so results are attributable to a specific evaluator implementation.
-The sorted source hash includes relative filenames and bytes of every `.ts`
-file recursively, including tests. Model identity records installed Pi
-versions, selected capabilities, catalog pricing, and a hash of selected
+sources hash, and the substitution scheme, so results are attributable to a
+specific evaluator and replay policy. The deterministic source hash includes
+sorted repository-relative filenames and bytes of every `.ts` file recursively
+under `exts/auto-approve/` (including tests), its `defaults.json`, and
+`benchmark/auto-approve/runner.ts` and `contracts.ts`. `fictional-install-v2`
+identifies replay with both fictional installation and bundled preset roots.
+Model identity records installed Pi versions, selected capabilities, catalog
+pricing, and a hash of selected
 metadata including thinking/sampling defaults. Requested effort is not proof
 of effective effort; reported provider effort/response model remain null when
 unavailable.

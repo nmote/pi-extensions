@@ -69,11 +69,24 @@ truncation without trusting old line offsets.
    possibly generated symlink notes. Do not copy that array into `matchedRules`.
    Consult current prompt construction; keep only identifiable case-specific
    matched instructions. Rebuild scope from roots and symlink behavior from
-   `realPaths`. Map implicit installation roots to `FICTIONAL_INSTALL`, not
-   arbitrary extra read grants. Never freeze historical system/default prompts.
-   Logs lack explicit home, matched-rule boundaries/descriptions and structured
-   symlink facts: exclude missing essential facts or disclose a synthetic
-   adaptation. Omit null guidance; keep case-specific guidance at revision 0.
+   `realPaths`. The runner supplies the five `FICTIONAL_INSTALL` skills/doc read
+   roots and bundled `defaults.json` read/write roots; the whole agent directory
+   is not a builtin read grant. Store only supplemental case roots. Schema 1
+   covers older full-root logs and newer supplemental-root logs: new logs omit
+   exact raw-string builtin duplicates, but older records and equivalent aliases
+   still need normalization against case cwd/home. Remove write duplicates only
+   of builtin write grants, and read duplicates of builtin read/write grants;
+   retain extra write permission for builtin read-only roots. Do not remove
+   parent/child overlaps or infer symlink equivalence. Map implicit installation
+   paths coherently, not to arbitrary extra grants. Never freeze historical
+   system/default prompts.
+   The benchmark assumes `builtin:defaults`, but production may omit that import.
+   Logs lack import provenance; supplemental roots alone do not establish faithful
+   scope. Exclude uncertain examples or disclose a synthetic baseline adaptation
+   for individual case approval. Logs also lack explicit home, matched-rule
+   boundaries/descriptions and structured symlink facts: exclude missing essential
+   facts or disclose a synthetic adaptation for that approval. Omit null guidance;
+   keep case-specific guidance at revision 0.
 4. Fictionalize all fields coherently, including input, cwd/home, roots, matched
    instructions, symlink keys/targets and guidance. Use `/home/dev` and the
    contract's fictional installation. Preserve scope relationships, raw

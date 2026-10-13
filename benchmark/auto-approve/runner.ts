@@ -2,14 +2,16 @@ import { performance } from "node:perf_hooks";
 import type { Model } from "@earendil-works/pi-ai";
 import { evaluateSafety, type EvaluationResult, type EvaluatorContext } from "../../exts/auto-approve/evaluator.ts";
 import { buildMatchInput, evaluatorInstructions } from "../../exts/auto-approve/rules.ts";
-import { FICTIONAL_INSTALL, sparseRealPath, type Case, type ModelIdentity, type Outcome, type TokenUsage } from "./contracts.ts";
+import { INSTALL_READ_ROOTS, sparseRealPath, type Case, type ModelIdentity, type Outcome, type TokenUsage } from "./contracts.ts";
+import { loadBuiltinRoots } from "../../exts/auto-approve/builtin-roots.ts";
 import { estimateCostUsd } from "./metrics.ts";
+
+const builtinRoots = loadBuiltinRoots();
 
 export function instructionsFor(value: Case): string[] {
 	return evaluatorInstructions(buildMatchInput(value.tool, value.input), value.cwd, {
-		writeRoots: value.writeRoots,
-		readRoots: [FICTIONAL_INSTALL.skillsDir, FICTIONAL_INSTALL.readmePath, FICTIONAL_INSTALL.docsPath,
-			FICTIONAL_INSTALL.examplesPath, FICTIONAL_INSTALL.changelogPath, ...value.readRoots],
+		writeRoots: [...builtinRoots.writeRoots, ...value.writeRoots],
+		readRoots: [...INSTALL_READ_ROOTS, ...builtinRoots.readRoots, ...value.readRoots],
 		matchedInstructions: value.matchedRules.map((rule) => rule.instructions),
 		homeDir: value.home,
 		realPath: sparseRealPath(value.realPaths ?? {}),

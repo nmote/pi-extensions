@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { main } from "./run.ts";
+import { main, sourceHash } from "./run.ts";
 import { isRunResult } from "./contracts.ts";
 
 const directory = await mkdtemp(join(tmpdir(), "pi-benchmark-"));
@@ -37,6 +37,28 @@ ModelRuntime.create = async (options) => {
 const logDir = join(directory, "logs");
 const args = ["--provider", "offline", "--model", "offline", "--log-dir", logDir];
 try {
+	const sources = ["exts/auto-approve/nested/rules.ts", "exts/auto-approve/index.ts",
+		"exts/auto-approve/defaults.json", "benchmark/auto-approve/runner.ts",
+		"benchmark/auto-approve/contracts.ts"];
+	const fixtures = [join(directory, "sources-a"), join(directory, "sources-b")];
+	for (const [index, fixture] of fixtures.entries()) {
+		await mkdir(join(fixture, "exts/auto-approve/nested"), { recursive: true });
+		await mkdir(join(fixture, "benchmark/auto-approve"), { recursive: true });
+		for (const source of index === 0 ? sources : [...sources].reverse()) {
+			await writeFile(join(fixture, source), source);
+		}
+	}
+	const baseline = await sourceHash(fixtures[0]);
+	assert.equal(await sourceHash(fixtures[0]), baseline);
+	assert.equal(await sourceHash(fixtures[1]), baseline);
+	await writeFile(join(fixtures[0], "exts/auto-approve/ignored.json"), "ignored");
+	assert.equal(await sourceHash(fixtures[0]), baseline);
+	for (const source of sources) {
+		await writeFile(join(fixtures[0], source), `${source} changed`);
+		assert.notEqual(await sourceHash(fixtures[0]), baseline, source);
+		await writeFile(join(fixtures[0], source), source);
+		assert.equal(await sourceHash(fixtures[0]), baseline);
+	}
 	const invalid = join(directory, "invalid.jsonl");
 	await writeFile(invalid, "{}\n");
 	await assert.rejects(main([...args, "--cases", invalid]), /case schema/);

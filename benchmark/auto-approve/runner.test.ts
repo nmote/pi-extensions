@@ -1,13 +1,41 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { loadCases, isRunResult } from "./contracts.ts";
+import { loadCases, isRunResult, INSTALL_READ_ROOTS, sparseRealPath } from "./contracts.ts";
+import { loadBuiltinRoots } from "../../exts/auto-approve/builtin-roots.ts";
+import { buildMatchInput, evaluatorInstructions } from "../../exts/auto-approve/rules.ts";
 import { calculateAggregates, summarizeUsage, summarizeLatency } from "./metrics.ts";
 import { instructionsFor, runEvaluations, tokenUsage } from "./runner.ts";
 import { cliOptions } from "./run.ts";
 import { buildSystemPrompt, evaluateSafety, type EvaluatorContext } from "../../exts/auto-approve/evaluator.ts";
 
 const cases = loadCases(await readFile(new URL("./cases.jsonl", import.meta.url), "utf8"));
+const builtin = loadBuiltinRoots();
+const scopeCase = { ...cases[0], writeRoots: ["../scratch/", "~/output/"],
+	readRoots: ["../reference/", "~/.cargo/registry/"] };
+const scope = instructionsFor(scopeCase)[0];
+for (const root of [...INSTALL_READ_ROOTS, ...builtin.writeRoots, ...builtin.readRoots]) {
+	assert.equal(scope.split(root).length - 1, 1, `baseline root appears once: ${root}`);
+}
+assert.ok(scope.includes("Writable roots: /home/dev/work/webapp, /tmp, /home/dev/work/scratch, /home/dev/output."));
+assert.ok(scope.includes("/home/dev/work/reference, /home/dev/.cargo/registry."));
+assert.ok(!scope.includes("../scratch") && !scope.includes("~/.cargo"));
+
+const cleaned = cases.find((value) => value.id === "bash-repo-relative-check")!;
+assert.deepEqual(cleaned.writeRoots, []);
+assert.deepEqual(cleaned.readRoots, ["/home/dev/.local/share/runtime/", "~/repos/", "~/.cargo/registry/"]);
+// Installation-only replay of the full-root fixture.
+const originalInstructions = evaluatorInstructions(buildMatchInput(cleaned.tool, cleaned.input), cleaned.cwd, {
+	writeRoots: ["/tmp"],
+	readRoots: [...INSTALL_READ_ROOTS, "/home/dev/.pi/agent/skills", "/home/dev/.pi/agent/README.md",
+		"/home/dev/.pi/agent/docs", "/home/dev/.pi/agent/examples", "/home/dev/.pi/agent/CHANGELOG.md",
+		"/home/dev/.local/share/runtime/", "~/repos/", "~/.cargo/registry/"],
+	matchedInstructions: cleaned.matchedRules.map((rule) => rule.instructions),
+	homeDir: cleaned.home, realPath: sparseRealPath(cleaned.realPaths ?? {}),
+});
+assert.equal(buildSystemPrompt(instructionsFor(cleaned), cleaned.sessionGuidance),
+	buildSystemPrompt(originalInstructions, cleaned.sessionGuidance));
+
 const pricing = { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1 };
 const model = {} as Parameters<typeof evaluateSafety>[0];
 const config = { timeoutMs: 10, reasoningEffort: "low" as const, memoize: false };

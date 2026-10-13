@@ -45,6 +45,7 @@ import { Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { EVALUATOR_CACHE_ENTRY, EvaluatorCache } from "./cache.ts";
 import { ApprovalQueue } from "./approval-queue.ts";
+import { loadBuiltinRoots, supplementalRoots } from "./builtin-roots.ts";
 import { type AutoApproveConfig, EFFORTS, isEffort, isMode, loadConfig, type Mode, MODES, saveEvaluatorEffort } from "./config.ts";
 import {
 	absoluteToolPath,
@@ -81,6 +82,7 @@ import {
 	guidanceTitle, isApprovalGuidance, parseGuidanceRequest, decodeGuidanceResponse, GuidanceError, isGuidanceError,
 } from "../shared/approval-guidance.ts";
 
+const builtinRoots = loadBuiltinRoots();
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const APPROVAL_TOOL = "request_tool_approval";
 const INLINE_SCRIPT_GUIDELINE = "Run small ad-hoc scripts inline using a quoted heredoc (e.g. `python3 - <<'EOF'`) rather than writing and executing a temporary script, so the approval evaluator can inspect the full body. Prefer `edit` for small, targeted file changes.";
@@ -364,7 +366,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			homeDir,
 			realPath: realPathOf,
 		});
-		return { writeRoots, readRoots, instructions };
+		return { ...supplementalRoots({ writeRoots, readRoots }, [skillsDir, ...installDocRoots], builtinRoots), instructions };
 	}
 
 	const evalWriter = new EvalLogWriter(agentDir);

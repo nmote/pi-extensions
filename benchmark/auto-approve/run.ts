@@ -44,21 +44,22 @@ export function cliOptions(args: string[]) {
 	};
 }
 
-async function sourceHash(directory: string): Promise<string> {
-	const files: string[] = [];
+export async function sourceHash(repositoryRoot: string = root): Promise<string> {
+	const files = ["exts/auto-approve/defaults.json", "benchmark/auto-approve/runner.ts",
+		"benchmark/auto-approve/contracts.ts"];
 	async function visit(dir: string): Promise<void> {
-		for (const entry of await readdir(dir, { withFileTypes: true })) {
-			const path = join(dir, entry.name);
+		for (const entry of await readdir(join(repositoryRoot, dir), { withFileTypes: true })) {
+			const path = `${dir}/${entry.name}`;
 			if (entry.isDirectory()) await visit(path);
 			else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(path);
 		}
 	}
-	await visit(directory);
+	await visit("exts/auto-approve");
 	const digest = createHash("sha256");
 	for (const path of files.sort()) {
-		digest.update(path.slice(directory.length).replaceAll("\\", "/"));
+		digest.update(path);
 		digest.update("\0");
-		digest.update(await readFile(path));
+		digest.update(await readFile(join(repositoryRoot, path)));
 		digest.update("\0");
 	}
 	return digest.digest("hex");
@@ -116,7 +117,7 @@ export async function main(args: string[]): Promise<number> {
 	const datasetIdentity = { caseIds: cases.map((value) => value.id), count: cases.length, contentHash: hash(bytes) };
 	const evaluatorPolicyIdentity = {
 		extensionVersion: JSON.parse(await readFile(join(root, "package.json"), "utf8")).version as string,
-		sourcesHash: await sourceHash(join(root, "exts/auto-approve")), substitution: SUBSTITUTION_ID,
+		sourcesHash: await sourceHash(root), substitution: SUBSTITUTION_ID,
 	};
 	if (options.dryRun) {
 		const preview = { dryRun: true, datasetIdentity, evaluatorPolicyIdentity,

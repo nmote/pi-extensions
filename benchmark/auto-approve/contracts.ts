@@ -12,12 +12,14 @@ import { isAbsolute, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { effortSchema, guidanceSchema, verdictSchema } from "../../exts/auto-approve/eval-log.ts";
+import { loadBuiltinRoots } from "../../exts/auto-approve/builtin-roots.ts";
+import { resolveRoot } from "../../exts/auto-approve/rules.ts";
 
 export const CASE_SCHEMA_VERSION = 1;
 export const RUN_RESULT_SCHEMA_VERSION = 1;
 
-/** Identifies the fictional installation substitution scheme; changes when the mapping changes. */
-export const SUBSTITUTION_ID = "fictional-install-v1";
+/** Identifies the fictional installation mapping and bundled-root replay baseline. */
+export const SUBSTITUTION_ID = "fictional-install-v2";
 
 /**
  * Fixed fictional installation. The runner maps every installation root the
@@ -35,6 +37,13 @@ export const FICTIONAL_INSTALL = {
 	examplesPath: "/home/dev/.pi/agent/examples",
 	changelogPath: "/home/dev/.pi/agent/CHANGELOG.md",
 } as const;
+
+export const INSTALL_READ_ROOTS = [
+	FICTIONAL_INSTALL.skillsDir, FICTIONAL_INSTALL.readmePath, FICTIONAL_INSTALL.docsPath,
+	FICTIONAL_INSTALL.examplesPath, FICTIONAL_INSTALL.changelogPath,
+];
+
+const builtinRoots = loadBuiltinRoots();
 
 // ---------------------------------------------------------------------------
 // Cases
@@ -60,7 +69,7 @@ export const caseSchema = Type.Object(
 		cwd: Type.String({ minLength: 1 }),
 		/** Fictional absolute home directory. */
 		home: Type.String({ minLength: 1 }),
-		/** Raw configured roots; relative and `~` forms resolve against the case cwd/home at run time. */
+		/** Supplemental roots; relative and `~` forms resolve against the case cwd/home at run time. */
 		writeRoots: Type.Array(Type.String()),
 		readRoots: Type.Array(Type.String()),
 		matchedRules: Type.Array(matchedRuleSchema),
@@ -127,6 +136,15 @@ function validateDataset(cases: Case[]): void {
 	const byId = new Map<string, Case>();
 	for (const value of cases) {
 		validateAbsoluteFields(value);
+		for (const field of ["writeRoots", "readRoots"] as const) {
+			const baseline = new Set(field === "writeRoots" ? builtinRoots.writeRoots
+				: [...INSTALL_READ_ROOTS, ...builtinRoots.readRoots, ...builtinRoots.writeRoots]);
+			for (const root of value[field]) {
+				if (baseline.has(resolveRoot(root, value.cwd, value.home))) {
+					throw new Error(`case ${value.id}: ${field} contains redundant builtin root: ${root}`);
+				}
+			}
+		}
 		if (byId.has(value.id)) throw new Error(`duplicate case id: ${value.id}`);
 		byId.set(value.id, value);
 	}
