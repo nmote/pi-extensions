@@ -10,6 +10,15 @@ dataset — it is not an exact historical replay. Shared contracts live in
 - `contracts.ts` — case schema + loader, run-result schema, sparse symlink
   resolver, fictional environment
 
+## Curation
+
+Use the repo-local [curation skill](../../.agents/skills/auto-approve-curation/SKILL.md)
+with `/skill:auto-approve-curation` from this checkout. Its helper batches private
+logs, applies explicit fictionalization mappings, and tracks dispositions in
+`<log-dir>/curation-state.json` without editing source logs. State writes need
+permission; public case additions require individual approval. The skill is not
+exposed by the installed extension package.
+
 ## Running
 
 ```sh

@@ -52,6 +52,10 @@ rerun `npm ci --ignore-scripts` and restart. Local dependency installation and
 updates are the checkout owner's responsibility. Limit tests/checks with
 `./scripts/test exts/auto-approve` or `./scripts/check exts/subagents`.
 
+The repo-local [auto-approve curation skill](.agents/skills/auto-approve-curation/SKILL.md)
+curates benchmark cases from private logs. Use `/skill:auto-approve-curation`
+from this checkout; it is not included in installed package resources.
+
 ### Resource selection
 
 Use `pi config`, or narrow the package entry in `<agent-dir>/settings.json`.
