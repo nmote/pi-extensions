@@ -60,7 +60,9 @@ import {
 	matchingInstructions,
 	symlinkNote,
 } from "./rules.ts";
-import { evaluateSafety } from "./evaluator.ts";
+import { type EvaluationResult, evaluateSafety } from "./evaluator.ts";
+import { EVAL_LOG_SCHEMA_VERSION, type EvalLogRecord } from "./eval-log.ts";
+import { EvalLogWriter } from "./eval-writer.ts";
 import { realPathOf } from "./realpath.ts";
 import {
 	AUTO_APPROVE_STATE_CHANNEL,
@@ -349,17 +351,56 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		return abs === undefined ? undefined : { abs, real: realPathOf(abs) };
 	}
 
-	/** Trusted evaluator instructions: the path scope, matching context rules, then any symlink note. */
-	function instructionList(input: MatchInput, cwd: string): string[] {
+	/** Trusted evaluator context: the path scope, matching context rules, then any symlink note. */
+	function evaluatorContext(input: MatchInput, cwd: string): EvalLogRecord["structuredContext"] {
 		// The skills and installed-doc roots are read-only here so bash can inspect
 		// what the read tool may.
-		return evaluatorInstructions(input, cwd, {
-			writeRoots: config.writeRoots,
-			readRoots: [skillsDir, ...installDocRoots, ...config.readRoots],
+		const writeRoots = [...config.writeRoots];
+		const readRoots = [skillsDir, ...installDocRoots, ...config.readRoots];
+		const instructions = evaluatorInstructions(input, cwd, {
+			writeRoots,
+			readRoots,
 			matchedInstructions: matchingInstructions(config.context, input),
 			homeDir,
 			realPath: realPathOf,
 		});
+		return { writeRoots, readRoots, instructions };
+	}
+
+	const evalWriter = new EvalLogWriter(agentDir);
+
+	/** Best-effort curation log of a real evaluator attempt; never affects approval. */
+	function logEvaluation(
+		ctx: ExtensionContext,
+		status: EvalLogRecord["status"],
+		attempt: {
+			toolName: string;
+			rawInput: Record<string, unknown>;
+			context: EvalLogRecord["structuredContext"];
+			policy: ApprovalGuidance;
+			effort: EvalLogRecord["effort"];
+			model: { provider: string; id: string };
+			result: EvaluationResult;
+		},
+	): void {
+		if (!config.logEvaluations) return;
+		evalWriter.log(
+			{
+				schemaVersion: EVAL_LOG_SCHEMA_VERSION,
+				timestamp: Date.now(),
+				tool: attempt.toolName,
+				input: attempt.rawInput,
+				cwd: ctx.cwd,
+				structuredContext: attempt.context,
+				guidance: attempt.policy.text ? { text: attempt.policy.text, revision: attempt.policy.revision } : null,
+				model: { provider: attempt.model.provider, model: attempt.model.id },
+				effort: attempt.effort,
+				decision: attempt.result.decision,
+				reason: attempt.result.reason,
+				status,
+			},
+			(message) => ctx.ui.notify(message, "warning"),
+		);
 	}
 
 	function approvalKey(toolName: string, input: Record<string, unknown>, cwd: string): string | undefined {
@@ -600,25 +641,33 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		try {
 			for (let attempt = 0; attempt < 3; attempt++) {
 				const policy = await exchangeGuidance({ action: "get" }, ctx);
-				const instructions = instructionList(input, ctx.cwd);
+				const context = evaluatorContext(input, ctx.cwd);
 				const effort = config.evaluator.reasoningEffort;
-				let result = config.evaluator.memoize ? evaluatorCache.get(input, instructions, policy) : undefined;
+				let result = config.evaluator.memoize ? evaluatorCache.get(input, context.instructions, policy) : undefined;
 				const cached = !!result;
+				let evaluated: { model: { provider: string; id: string }; result: EvaluationResult } | undefined;
 				if (!result) {
 					const model = await ensureSmallModel(ctx);
 					if (!model) return softReject(ctx, toolName, rawInput, input, "no evaluator model available", true);
 					ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 					try {
-						result = await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, instructions, policy);
+						result = await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, context.instructions, policy);
 					} finally {
 						ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
 					}
+					evaluated = { model, result };
 				}
 				// The final authoritative read is the authorization boundary, even if its RPC response is buffered.
 				const current = await exchangeGuidance({ action: "get" }, ctx);
-				if (current.revision !== policy.revision || current.text !== policy.text || config.evaluator.reasoningEffort !== effort) continue;
+				if (current.revision !== policy.revision || current.text !== policy.text || config.evaluator.reasoningEffort !== effort) {
+					if (evaluated) {
+						logEvaluation(ctx, "discarded", { toolName, rawInput, context, policy, effort, ...evaluated });
+					}
+					continue;
+				}
+				if (evaluated) logEvaluation(ctx, "accepted", { toolName, rawInput, context, policy, effort, ...evaluated });
 				if (!cached && config.evaluator.memoize) {
-					const entry = evaluatorCache.remember(input, result, instructions, policy);
+					const entry = evaluatorCache.remember(input, result, context.instructions, policy);
 					if (entry) pi.appendEntry(EVALUATOR_CACHE_ENTRY, { ...entry, effort });
 				}
 				if (result.decision === "allow") {
@@ -744,7 +793,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
 					return;
 				}
-				const instructions = instructionList(buildMatchInput(call.toolName, call.input), ctx.cwd);
+				const instructions = evaluatorContext(buildMatchInput(call.toolName, call.input), ctx.cwd).instructions;
 				ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 				let result: Awaited<ReturnType<typeof evaluateSafety>>;
 				try {

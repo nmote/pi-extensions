@@ -1,13 +1,16 @@
 /**
  * Private log-record contract for auto-approve evaluator decisions.
  *
- * One record per actual model attempt. Cache hits are never logged, and
+ * One record per actual model attempt, written for benchmark case curation:
+ * the example (tool/input/cwd/context/guidance snapshot) is the data; the
+ * evaluator's decision is incidental. Cache hits are never logged, and
  * rendered prompts and standard extension guidance are never recorded — only
- * the inputs that drove the decision. Persisting is best-effort: a record that
- * fails to write is simply lost, since a failed write cannot record its own
- * discard. `accepted` means the verdict was applied; `discarded` means the
- * attempt was valid but its verdict went unused (e.g. session guidance changed
- * mid-flight). Log-file location and opt-in mechanics live in the extension.
+ * the inputs that drove the decision. Persisting is best-effort: a record
+ * that fails to write is simply lost. `accepted` means the verdict was
+ * applied; `discarded` means the attempt was valid but its verdict went
+ * unused (e.g. session guidance changed mid-flight). Failed attempts log
+ * uniformly; the reason text reveals the failure. Log-file location and
+ * opt-in mechanics live in the extension.
  *
  * Also the shared field shapes (verdict, effort, guidance snapshot) for the
  * benchmark contracts in benchmark/auto-approve/contracts.ts.
@@ -49,7 +52,7 @@ export const evalLogRecordSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		guidance: guidanceSnapshotSchema,
-		/** Provenance of the model that produced the attempt. */
+		/** The model that produced the attempt. */
 		model: Type.Object(
 			{
 				provider: Type.String({ minLength: 1 }),
@@ -57,22 +60,9 @@ export const evalLogRecordSchema = Type.Object(
 			},
 			{ additionalProperties: false },
 		),
-		/** Version of the pi-extensions package that produced the decision. */
-		evaluatorVersion: Type.String({ minLength: 1 }),
 		effort: effortSchema,
-		timeoutMs: Type.Number({ exclusiveMinimum: 0 }),
 		decision: verdictSchema,
 		reason: Type.String(),
-		/** False only for synthetic fallback results caused by evaluator failure. */
-		cacheable: Type.Boolean(),
-		attempt: Type.Object(
-			{
-				/** Raw model stop reason, captured before fallback; null when the attempt produced none. */
-				stopReason: Type.Union([Type.String(), Type.Null()]),
-			},
-			{ additionalProperties: false },
-		),
-		elapsedMs: Type.Number({ minimum: 0 }),
 		status: Type.Union([Type.Literal("accepted"), Type.Literal("discarded")]),
 	},
 	{ additionalProperties: false },

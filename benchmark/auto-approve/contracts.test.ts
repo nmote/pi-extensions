@@ -193,18 +193,12 @@ const logRecord = {
 	structuredContext: { writeRoots: [], readRoots: [], instructions: [] },
 	guidance: null,
 	model: { provider: "p", model: "m" },
-	evaluatorVersion: "0.1.0",
 	effort: "low",
-	timeoutMs: 1000,
 	decision: "allow",
 	reason: "safe",
-	cacheable: true,
-	attempt: { stopReason: "stop" },
-	elapsedMs: 5,
 	status: "accepted",
 };
 check("accepts a valid log record", isEvalLogRecord(logRecord));
-check("accepts a null stop reason on failures", isEvalLogRecord({ ...logRecord, attempt: { stopReason: null } }));
 check("rejects an unknown log status", !isEvalLogRecord({ ...logRecord, status: "applied" }));
 
 const zeroUsage = {

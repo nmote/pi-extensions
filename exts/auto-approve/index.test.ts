@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,8 @@ import {
 } from "../shared/subagent-protocol.ts";
 import { getDocsPath, getExamplesPath, getPackageDir, getReadmePath } from "@earendil-works/pi-coding-agent";
 import { saveEvaluatorEffort } from "./config.ts";
+import { isEvalLogRecord } from "./eval-log.ts";
+import { APPROVAL_GUIDANCE_CHANNEL } from "../shared/approval-guidance.ts";
 import autoApprove from "./index.ts";
 import subagents from "../subagents/index.ts";
 import { scopeInstruction } from "./rules.ts";
@@ -206,6 +208,7 @@ async function main(): Promise<void> {
 		let resumedEntries: Array<{ type: string; customType: string; data: unknown }> | undefined;
 		const allowResponse = { stopReason: "stop", content: [{ type: "text", text: '{"decision":"allow","reason":"ok"}' }] };
 		let evaluatorResponse: { stopReason: string; content: unknown[] } = allowResponse;
+		let onEvaluate: (() => void) | undefined;
 		const ctx = {
 			cwd: "/workspace",
 			hasUI: true,
@@ -215,7 +218,7 @@ async function main(): Promise<void> {
 				streamSimple: (_model: unknown, request: (typeof evaluatorRequests)[number], options: { reasoning: string }) => {
 					evaluatorRequests.push(request);
 					evaluatorEfforts.push(options.reasoning);
-					return { result: async () => evaluatorResponse };
+					return { result: async () => { onEvaluate?.(); return evaluatorResponse; } };
 				},
 			},
 			sessionManager: { getEntries: () => resumedEntries ?? [cachedReview, cachedMetadataReview] },
@@ -670,6 +673,62 @@ async function main(): Promise<void> {
 				check(`${boundary} permits fresh approvals`, (await fresh).content[0].text.startsWith("Approved once"));
 			}
 		})());
+
+		// Evaluation logging (opt-in)
+		const logFile = join(temp, "auto-approve-logs", "evaluations.jsonl");
+		check("no evaluation log is written while disabled", !existsSync(logFile));
+		writeFileSync(configFile, JSON.stringify({ imports: ["./auto-approve-base.json"], defaultMode: "auto", logEvaluations: true }));
+		resumedEntries = [];
+		await handlers.get("session_start")?.[0]?.({}, ctx);
+		evaluatorResponse = allowResponse;
+
+		const requestsBeforeLogging = evaluatorRequests.length;
+		const loggedCall = { toolName: "bash", input: { command: "logged-allow" } };
+		check("logged allow is approved", (await gate(loggedCall, ctx)) === undefined);
+		check(
+			"cache hit is approved without evaluation",
+			(await gate(loggedCall, ctx)) === undefined && evaluatorRequests.length === requestsBeforeLogging + 1,
+		);
+		const loggedRecords = readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		check(
+			"real attempts are logged as schema-conforming records; cache hits are not",
+			loggedRecords.length === 1 && isEvalLogRecord(loggedRecords[0]) && loggedRecords[0].status === "accepted" &&
+				loggedRecords[0].tool === "bash",
+		);
+		check("records omit the rendered prompt", !JSON.stringify(loggedRecords).includes("security gate"));
+		check(
+			"records capture the call, context, and model",
+			loggedRecords[0].input.command === "logged-allow" && loggedRecords[0].cwd === "/workspace" &&
+				Array.isArray(loggedRecords[0].structuredContext.instructions) &&
+				loggedRecords[0].model.provider === "test" && loggedRecords[0].model.model === "small" &&
+				loggedRecords[0].guidance === null,
+		);
+
+		let mutateGuidance = true;
+		onEvaluate = () => {
+			if (!mutateGuidance) return;
+			mutateGuidance = false;
+			pi.events.emit(APPROVAL_GUIDANCE_CHANNEL, {
+				request: { action: "set", text: "allow logged commands", expectedRevision: 0 },
+				ctx,
+				respond: () => {},
+			});
+		};
+		check(
+			"call is approved after a mid-flight guidance change retries",
+			(await gate({ toolName: "bash", input: { command: "logged-discard" } }, ctx)) === undefined,
+		);
+		onEvaluate = undefined;
+		const loggedAttempts = readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line)).slice(-2);
+		check(
+			"discarded and retried attempts are both logged",
+			loggedAttempts.length === 2 && loggedAttempts[0].status === "discarded" && loggedAttempts[1].status === "accepted",
+		);
+		check(
+			"each record keeps its own guidance snapshot",
+			loggedAttempts[0].guidance === null && loggedAttempts[1].guidance?.text === "allow logged commands" &&
+				loggedAttempts[1].guidance?.revision === 1,
+		);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

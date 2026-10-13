@@ -80,6 +80,8 @@ export interface AutoApproveConfig {
 	/** Extra roots where read is auto-approved, in addition to cwd and write roots. `~` expands. */
 	readRoots: string[];
 	evaluator: EvaluatorConfig;
+	/** Log real evaluator attempts to a private JSONL file for benchmark curation. */
+	logEvaluations: boolean;
 }
 
 const BUNDLED_DEFAULTS_PATH = fileURLToPath(new URL("./defaults.json", import.meta.url));
@@ -172,6 +174,7 @@ export interface RawConfig {
 	writeRoots?: unknown;
 	readRoots?: unknown;
 	evaluator?: unknown;
+	logEvaluations?: unknown;
 }
 
 const MAX_IMPORT_DEPTH = 10;
@@ -228,6 +231,9 @@ export function mergeRaw(base: RawConfig, overlay: RawConfig): RawConfig {
 
 	if (overlay.defaultMode !== undefined) result.defaultMode = overlay.defaultMode;
 	else if (base.defaultMode !== undefined) result.defaultMode = base.defaultMode;
+
+	if (overlay.logEvaluations !== undefined) result.logEvaluations = overlay.logEvaluations;
+	else if (base.logEvaluations !== undefined) result.logEvaluations = base.logEvaluations;
 
 	const leftEval = base.evaluator && typeof base.evaluator === "object" ? (base.evaluator as Record<string, unknown>) : {};
 	const rightEval = overlay.evaluator && typeof overlay.evaluator === "object" ? (overlay.evaluator as Record<string, unknown>) : {};
@@ -299,6 +305,7 @@ export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 			defaultMode: "manual", allow: [], deny: [], context: [], writeRoots: [], readRoots: [],
 			// Manual mode does not evaluate unmatched calls.
 			evaluator: defaults?.evaluator ?? { reasoningEffort: "low", timeoutMs: 0, memoize: false },
+			logEvaluations: false,
 		};
 	}
 
@@ -316,5 +323,6 @@ export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 			timeoutMs: typeof rawEval.timeoutMs === "number" && Number.isFinite(rawEval.timeoutMs) && rawEval.timeoutMs > 0 ? rawEval.timeoutMs : defaults.evaluator.timeoutMs,
 			memoize: typeof rawEval.memoize === "boolean" ? rawEval.memoize : defaults.evaluator.memoize,
 		},
+		logEvaluations: raw.logEvaluations === true,
 	};
 }

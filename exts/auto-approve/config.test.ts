@@ -81,6 +81,12 @@ try {
 		writeFileSync(localConfig, '{"defaultMode":"yolo","evaluator":{"memoize":false}}');
 		const partial = loadConfig();
 		check("partial overrides preserve other engine settings", emptyPolicy(partial) && partial.defaultMode === "yolo" && !partial.evaluator.memoize && partial.evaluator.reasoningEffort === "medium" && partial.evaluator.timeoutMs === 20000);
+		writeFileSync(localConfig, '{"logEvaluations":true}');
+		check("logEvaluations opt-in is parsed", loadConfig().logEvaluations === true);
+		writeFileSync(localConfig, '{"logEvaluations":"yes"}');
+		check("non-boolean logEvaluations stays disabled", loadConfig().logEvaluations === false);
+		writeFileSync(localConfig, "{}");
+		check("logEvaluations defaults to disabled", loadConfig().logEvaluations === false);
 		writeFileSync(localConfig, '{"defaultMode":"invalid","evaluator":{"reasoningEffort":"invalid","timeoutMs":0,"memoize":"yes"}}');
 		check("invalid values fall back to bundled settings", JSON.stringify(loadConfig()) === JSON.stringify(missing));
 		writeFileSync(localConfig, '{"imports":["builtin:defaults","builtin:bad"],"allow":[{"tool":"bash","pattern":".*"}]}');
@@ -142,6 +148,12 @@ try {
 	);
 	const evalObj = merged.evaluator as { timeoutMs?: number; memoize?: boolean };
 	check("evaluator deep-merges per field", evalObj.timeoutMs === 1000 && evalObj.memoize === false);
+	check(
+		"logEvaluations merges overlay over base",
+		mergeRaw({ logEvaluations: false }, { logEvaluations: true }).logEvaluations === true &&
+			mergeRaw({ logEvaluations: true }, {}).logEvaluations === true &&
+			!("logEvaluations" in mergeRaw({}, {})),
+	);
 	check("imports directive is dropped", !("imports" in merged));
 
 	const fresh = join(files, "new", "auto-approve.json");

@@ -29,4 +29,10 @@ Choose an authenticated evaluator with [`/small-model`](../small-model/README.md
 
 Approval dialogs offer **Approve once + edit session guidance…**. Like `/auto guidance`, this supplies session-scoped evaluator instructions. Name operations and targets explicitly: the evaluator cannot see your conversation. Guidance persists across resume/reload and applies to subagents; a footer indicator marks it active. It overrides conflicting evaluator defaults/context within its scope, but cannot override deny rules, explicit denials, or injection safeguards. It affects evaluated calls only, not allowlisted calls or manual/yolo behavior. Editing or clearing it invalidates cached and pending verdicts, but does not revoke calls already authorized by the final main-session policy check or separate exact-call approvals.
 
+## Evaluation logging
+
+Set `"logEvaluations": true` in configuration to append every real evaluator attempt to `<agent-dir>/auto-approve-logs/evaluations.jsonl` (private: directory 0700, file 0600), one JSON record per line. Records exist for benchmark case curation: they capture the tool call, working directory, configured context, session-guidance snapshot, model, effort, verdict, and whether the verdict was applied (`accepted`) or unused after a mid-flight policy change (`discarded`). Cache hits, allow/deny-list matches, human approvals, and `/auto test` probes are never logged, and rendered prompts are never recorded.
+
+**Records contain raw tool-call input, which may include private code, and session guidance; accidental secrets are rare but possible.** Logs are never uploaded; delete the directory to discard them. Curating cases for the public benchmark is the boundary where sensitive data must be excluded — the raw log makes no sanitization guarantees. Logging is best-effort: a write failure disables it (with one notification) and never affects approval behavior.
+
 `<agent-dir>` defaults to `~/.pi/agent`; `PI_CODING_AGENT_DIR` overrides it.
