@@ -66,6 +66,7 @@ import {
 } from "./rules.ts";
 import { type EvaluationResult, evaluateSafety } from "./evaluator.ts";
 import { evaluateSafetyJev } from "./jev-evaluator.ts";
+import { explainJevDenial } from "./denial-explanation.ts";
 import { EVAL_LOG_SCHEMA_VERSION, type EvalLogRecord } from "./eval-log.ts";
 import { EvalLogWriter } from "./eval-writer.ts";
 import { realPathOf } from "./realpath.ts";
@@ -349,9 +350,10 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				);
 				return undefined;
 			}
+			const result = await evaluateSafetyJev(classifier, ctx, toolName, rawInput, config.evaluator, instructions, policy);
 			return {
 				model: { provider: classifier.provider, id: classifier.id },
-				result: await evaluateSafetyJev(classifier, ctx, toolName, rawInput, config.evaluator, instructions, policy),
+				result: await explainJevDenial(result, ctx, toolName, rawInput, config.evaluator, instructions, policy),
 			};
 		}
 		const model = await ensureSmallModel(ctx);

@@ -770,6 +770,28 @@ async function main(): Promise<void> {
 			loggedAttempts[0].guidance === null && loggedAttempts[1].guidance?.text === "allow logged commands" &&
 				loggedAttempts[1].guidance?.revision === 1,
 		);
+
+		let classifications = 0;
+		const jevCtx = { ...ctx, modelRegistry: {
+			...ctx.modelRegistry,
+			findOfType: () => ({ provider: "typesafe", id: "jev-latest" }),
+			getProviderAuthStatus: () => ({ configured: true }),
+			classify: async () => {
+				classifications++;
+				return { stopReason: "stop", answers: { verdict: {
+					type: "choice", choice: "review", probabilities: { review: 0.98 }, confidence: 0.99,
+				} } };
+			},
+		} };
+		await commands.get("auto").handler("evaluator jev", jevCtx);
+		evaluatorResponse = { stopReason: "stop", content: [{ type: "text", text: "Needs human judgment." }] };
+		const chatCalls = evaluatorRequests.length;
+		const jevDenied = await gate({ toolName: "bash", input: { command: "jev-review" } }, jevCtx);
+		check("Jev rejection uses chat explanation", jevDenied?.block === true && jevDenied.reason.includes("Needs human judgment."));
+		await gate({ toolName: "bash", input: { command: "jev-review" } }, jevCtx);
+		check("cached Jev rejection avoids classifier and chat calls", classifications === 1 && evaluatorRequests.length === chatCalls + 1);
+		await commands.get("auto").handler("test jev-review", jevCtx);
+		check("auto test explains Jev reviews", notices.at(-1)?.includes("REVIEW\nNeeds human judgment.") === true && classifications === 2);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
