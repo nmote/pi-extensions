@@ -179,8 +179,16 @@ check(
 );
 
 // Evaluator path scope
-check("no scope instruction for cwd alone", scopeInstruction(cwd, [], [], home) === undefined);
-const scope = scopeInstruction("/workspace/child", ["../build", "/tmp"], ["../docs", "~/repos", "/tmp"], home) ?? "";
+const cwdScope = scopeInstruction(cwd, [], [], home);
+check(
+	"cwd-only scope carries read boundaries and metadata write restrictions",
+	cwdScope.includes(`Writable roots: ${cwd}.`) &&
+		cwdScope.includes("not their parents or siblings") &&
+		cwdScope.includes("Request review for reads outside these roots") &&
+		cwdScope.includes("unless specifically authorized by configured instructions or session guidance") &&
+		cwdScope.includes("Request review for direct writes, edits, or deletions of .git or .hg metadata even within writable roots"),
+);
+const scope = scopeInstruction("/workspace/child", ["../build", "/tmp"], ["../docs", "~/repos", "/tmp"], home);
 check(
 	"scope instruction resolves configured roots against cwd",
 	scope.includes("Writable roots: /workspace/child, /workspace/build, /tmp.") &&

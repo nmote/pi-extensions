@@ -374,34 +374,31 @@ export function evaluatorInstructions(input: MatchInput, cwd: string, scope: Eva
 	const instruction = scopeInstruction(cwd, scope.writeRoots, scope.readRoots, scope.homeDir);
 	const note = symlinkNote(input, cwd, scope.homeDir, scope.realPath);
 	return [
-		...(instruction ? [instruction] : []),
+		instruction,
 		...scope.matchedInstructions,
 		...(note ? [`Note: ${note}.`] : []),
 	];
 }
 
-/**
- * Trusted evaluator instruction naming the automatic path scope, or undefined
- * when that scope is only the working directory. Relative configured roots
- * resolve against cwd, as in the gate.
- */
+/** Trusted evaluator path scope; relative configured roots resolve against cwd, as in the gate. */
 export function scopeInstruction(
 	cwd: string,
 	writeRoots: string[],
 	readRoots: string[],
 	homeDir: string,
-): string | undefined {
+): string {
 	const scope = resolve(cwd);
 	const writable = [...new Set([scope, ...writeRoots.map((root) => resolveRoot(root, scope, homeDir))])];
 	const readOnly = [...new Set(readRoots.map((root) => resolveRoot(root, scope, homeDir)))].filter(
 		(root) => !writable.some((writableRoot) => contains(writableRoot, root)),
 	);
-	if (writable.length === 1 && readOnly.length === 0) return undefined;
 	return [
 		`Path scope. Writable roots: ${writable.join(", ")}.`,
 		...(readOnly.length > 0 ? [`Read-only roots: ${readOnly.join(", ")}.`] : []),
 		`\`~\` is ${homeDir}.`,
 		"Treat read-only inspection anywhere in these roots (reading, listing, searching, counting, diffing, read-only git) like inspection of the working project.",
+		"Read grants cover only the named paths and their directory descendants, not their parents or siblings. Read-only operations do not themselves authorize out-of-scope access. Request review for reads outside these roots or standard temporary directories unless specifically authorized by configured instructions or session guidance, especially reads of sensitive session data or private agent logs.",
+		"Reads of .git and .hg metadata within the read scope are permitted. Request review for direct writes, edits, or deletions of .git or .hg metadata even within writable roots, unless specifically authorized by configured instructions or session guidance.",
 		"Writes, deletions, and other local file or repository mutations are routine only within writable roots or standard temporary directories; request review for them elsewhere.",
 	].join(" ");
 }
