@@ -38,7 +38,7 @@ assert.equal(buildSystemPrompt(instructionsFor(cleaned), cleaned.sessionGuidance
 
 const pricing = { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1 };
 const model = {} as Parameters<typeof evaluateSafety>[0];
-const config = { timeoutMs: 10, reasoningEffort: "low" as const, memoize: false, backend: "chat" as const, jev: { model: "jev-latest" } };
+const config = { timeoutMs: 10, reasoningEffort: "low" as const, memoize: false, backend: "chat" as const, jev: { provider: "typesafe", model: "jev-latest" } };
 const usage = { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 

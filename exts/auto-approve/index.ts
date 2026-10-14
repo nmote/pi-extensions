@@ -317,18 +317,19 @@ export default function autoApprove(pi: ExtensionAPI): void {
 
 	function evaluatorLabel(): string {
 		return config.evaluator.backend === "jev"
-			? `jev (typesafe/${config.evaluator.jev.model})`
+			? `jev (${config.evaluator.jev.provider}/${config.evaluator.jev.model})`
 			: "chat model (managed by /small-model)";
 	}
 
-	function setBackend(backend: EvaluatorBackend, ctx: ExtensionContext): void {
+	function setBackend(backend: EvaluatorBackend, ctx: ExtensionContext, jev?: AutoApproveConfig["evaluator"]["jev"]): void {
 		try {
-			saveEvaluatorBackend(backend);
+			saveEvaluatorBackend(backend, undefined, jev);
 		} catch (error) {
 			ctx.ui.notify(`Auto-approve: could not save evaluator backend: ${error}`, "error");
 			return;
 		}
 		config.evaluator.backend = backend;
+		if (jev) config.evaluator.jev = jev;
 		evaluatorCache.clear();
 		ctx.ui.notify(`Auto-approve evaluator: ${evaluatorLabel()}`, "info");
 	}
@@ -342,12 +343,14 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		policy: ApprovalGuidance,
 	): Promise<{ model: { provider: string; id: string }; result: EvaluationResult } | undefined> {
 		if (config.evaluator.backend === "jev") {
-			const classifier = ctx.modelRegistry.findOfType("classifier", "typesafe", config.evaluator.jev.model);
-			if (!classifier || !ctx.modelRegistry.getProviderAuthStatus("typesafe").configured) {
-				ctx.ui.notify(
-					"Auto-approve: Jev evaluator unavailable; run /login typesafe or pick another backend with /auto evaluator",
-					"warning",
-				);
+			const { provider, model } = config.evaluator.jev;
+			const classifier = ctx.modelRegistry.findOfType("classifier", provider, model);
+			if (!classifier) {
+				ctx.ui.notify(`Auto-approve: Jev model ${provider}/${model} not found; check evaluator.jev or run /auto evaluator`, "warning");
+				return undefined;
+			}
+			if (!ctx.modelRegistry.getProviderAuthStatus(provider).configured) {
+				ctx.ui.notify(`Auto-approve: Jev credentials missing; run /login ${provider}${provider === "cloudflare-workers-ai" ? " and configure CLOUDFLARE_ACCOUNT_ID" : ""}, or run /auto evaluator`, "warning");
 				return undefined;
 			}
 			const result = await evaluateSafetyJev(classifier, ctx, toolName, rawInput, config.evaluator, instructions, policy);
@@ -700,6 +703,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				const policy = await exchangeGuidance({ action: "get" }, ctx);
 				const context = evaluatorContext(input, ctx.cwd);
 				const effort = config.evaluator.reasoningEffort;
+				const evaluator = evaluatorLabel();
 				let result = config.evaluator.memoize ? evaluatorCache.get(input, context.instructions, policy) : undefined;
 				const cached = !!result;
 				let evaluated: { model: { provider: string; id: string }; result: EvaluationResult } | undefined;
@@ -715,7 +719,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				}
 				// The final authoritative read is the authorization boundary, even if its RPC response is buffered.
 				const current = await exchangeGuidance({ action: "get" }, ctx);
-				if (current.revision !== policy.revision || current.text !== policy.text || config.evaluator.reasoningEffort !== effort) {
+				if (current.revision !== policy.revision || current.text !== policy.text || config.evaluator.reasoningEffort !== effort || evaluatorLabel() !== evaluator) {
 					if (evaluated) {
 						logEvaluation(ctx, "discarded", { toolName, rawInput, context, policy, effort, ...evaluated });
 					}
@@ -724,7 +728,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				if (evaluated) logEvaluation(ctx, "accepted", { toolName, rawInput, context, policy, effort, ...evaluated });
 				if (!cached && config.evaluator.memoize) {
 					const entry = evaluatorCache.remember(input, result, context.instructions, policy);
-					if (entry) pi.appendEntry(EVALUATOR_CACHE_ENTRY, { ...entry, effort });
+					if (entry) pi.appendEntry(EVALUATOR_CACHE_ENTRY, { ...entry, effort, evaluator });
 				}
 				if (result.decision === "allow") {
 					record("evaluatorAllows", ctx);
@@ -830,10 +834,37 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				}
 				const choice = requested || await ctx.ui.select(
 					`Evaluator backend (current: ${config.evaluator.backend}):`,
-					["Chat model (managed by /small-model)", `Jev (typesafe/${config.evaluator.jev.model})`],
+					["Chat model (managed by /small-model)", "Jev"],
 				);
 				const backend = requested || (choice?.startsWith("Jev") ? "jev" : choice ? "chat" : undefined);
-				if (isBackend(backend)) setBackend(backend, ctx);
+				if (!isBackend(backend)) return;
+				if (backend === "chat") {
+					setBackend(backend, ctx);
+					return;
+				}
+				const available = [
+					{ provider: "typesafe", model: "jev-latest" },
+					{ provider: "cloudflare-workers-ai", model: "typesafe/jev" },
+				].map((entry) => entry.provider === config.evaluator.jev.provider &&
+					ctx.modelRegistry.findOfType("classifier", entry.provider, config.evaluator.jev.model)
+					? { ...config.evaluator.jev } : entry)
+					.filter(({ provider, model }) => ctx.modelRegistry.findOfType("classifier", provider, model) &&
+						ctx.modelRegistry.getProviderAuthStatus(provider).configured);
+				if (!available.length) {
+					ctx.ui.notify("Auto-approve: no authenticated Jev provider available; run /login typesafe or /login cloudflare-workers-ai (also configure CLOUDFLARE_ACCOUNT_ID)", "warning");
+					return;
+				}
+				let selected = available.length === 1 ? available[0] : undefined;
+				if (!selected) {
+					if (!ctx.hasUI) {
+						ctx.ui.notify("Auto-approve: multiple Jev providers available; configure evaluator.jev.provider and evaluator.jev.model, or run /auto evaluator with a UI", "warning");
+						return;
+					}
+					const labels = available.map(({ provider, model }) => `${provider} (${model})`);
+					const providerChoice = await ctx.ui.select("Jev provider:", labels);
+					selected = available.find((_, index) => labels[index] === providerChoice);
+				}
+				if (selected) setBackend(backend, ctx, selected);
 				return;
 			}
 
@@ -901,7 +932,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		const entries = ctx.sessionManager.getEntries() as Array<{
 			type: string;
 			customType?: string;
-			data?: { mode?: unknown; effort?: unknown; key?: unknown };
+			data?: { mode?: unknown; effort?: unknown; evaluator?: unknown; key?: unknown };
 		}>;
 		mode = config.defaultMode;
 		guidance = { text: "", revision: 0 };
@@ -911,12 +942,13 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		stats = emptyStats();
 		for (const e of entries) {
 			if (e.type !== "custom") continue;
-			const data = e.data as { mode?: unknown; effort?: unknown; key?: unknown } | undefined;
+			const data = e.data as { mode?: unknown; effort?: unknown; evaluator?: unknown; key?: unknown } | undefined;
 			if (e.customType === GUIDANCE_ENTRY && isApprovalGuidance(e.data)) guidance = { ...e.data };
 			if (e.customType === MODE_ENTRY && isMode(data?.mode)) mode = data.mode;
 			if (e.customType === MEMO_ENTRY && typeof data?.key === "string") alwaysAllow.add(data.key);
 			if (e.customType === HUMAN_DENY_ENTRY && typeof data?.key === "string") humanDenied.add(data.key);
-			if (e.customType === EVALUATOR_CACHE_ENTRY && data?.effort === config.evaluator.reasoningEffort) {
+			if (e.customType === EVALUATOR_CACHE_ENTRY && data?.effort === config.evaluator.reasoningEffort &&
+				data.evaluator === evaluatorLabel()) {
 				evaluatorCache.restore(e.data);
 			}
 			if (e.customType === STATS_ENTRY) stats = restoredStats(e.data) ?? stats;

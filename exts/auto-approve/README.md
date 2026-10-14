@@ -8,7 +8,7 @@ Controls tool permissions using explicit rules, human approval, or a background-
   - `/auto manual|auto|yolo` — Choose prompting, model evaluation, or automatic permission for unmatched calls; deny rules always apply.
   - `/auto guidance [clear]` — View/edit session evaluator guidance, or clear it.
   - `/auto effort [low|medium|high]` — Pick or set evaluator reasoning effort (`evaluator.reasoningEffort` in configuration; inert for the Jev backend).
-  - `/auto evaluator [chat|jev]` — Pick or set the evaluator backend (`evaluator.backend` in configuration).
+  - `/auto evaluator [chat|jev]` — Pick or set the evaluator backend (`evaluator.backend` in configuration). Jev then offers authenticated TypeSafe and Workers AI providers, skipping the provider picker when only one is available. Cancellation preserves settings.
   - `/auto stats` — Show evaluation and human-approval counters.
   - `/auto test <bash command>` or `/auto test <tool> <json object>` — Ask the evaluator for a verdict without executing the call.
 
@@ -26,11 +26,19 @@ Imports concatenate permission lists; empty local lists do not clear imported en
 
 Session-local tools and file access within cwd or configured roots are permitted by the base policy, excluding direct writes/edits to Git/Hg metadata; in-scope metadata reads are permitted; global skill reads and the running Pi installation's bundled documentation and examples (README, docs, examples, CHANGELOG) are also permitted, read-only. Unmatched calls prompt in `manual`, use the selected small model in `auto`, and proceed in `yolo`.
 
-Two evaluator backends are available. The default `chat` backend uses the shared small model: choose an authenticated one with [`/small-model`](../small-model/README.md); there is no default, and calls may incur costs. The `jev` backend uses Pi's built-in TypeSafe System One classifier (`typesafe/jev-latest`; override with `evaluator.jev.model`), which returns a structured allow/review choice instead of prose; an allow requires confidence ≥ 0.5 (not configurable). Successful Jev review decisions get a best-effort explanation from the saved `/small-model` selection when authenticated, without opening a picker or changing the verdict. This independent explanation is not Jev's internal reasoning; it adds a chat call, cost, and up to one additional evaluator timeout of latency. Missing models or explanation failures retain Jev's probability/confidence reason. The classifier-only benchmark excludes explanations. Evaluations cache verdicts (including explanations) and default to a 20-second timeout and `medium` reasoning effort. Failures never grant access; required prompts without a usable UI block execution.
+Two evaluator backends are available. The default `chat` backend uses the shared small model: choose an authenticated one with [`/small-model`](../small-model/README.md); there is no default, and calls may incur costs. The `jev` backend uses Pi's built-in Jev classifier (default `typesafe/jev-latest`; override with `evaluator.jev.provider` and `evaluator.jev.model`), which returns a structured allow/review choice instead of prose; an allow requires confidence ≥ 0.5 (not configurable). Successful Jev review decisions get a best-effort explanation from the saved `/small-model` selection when authenticated, without opening a picker or changing the verdict. This independent explanation is not Jev's internal reasoning; it adds a chat call, cost, and up to one additional evaluator timeout of latency. Missing models or explanation failures retain Jev's probability/confidence reason. The classifier-only benchmark excludes explanations. Evaluations cache verdicts (including explanations) and default to a 20-second timeout and `medium` reasoning effort. Failures never grant access; required prompts without a usable UI block execution.
 
 ### Jev authentication
 
 Direct: set `TYPESAFE_API_KEY` or run `/login typesafe`; Pi's normal credential precedence applies.
+
+Cloudflare Workers AI: run `/login cloudflare-workers-ai` and supply the API token and account ID, or set `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` before starting Pi. Run `/auto evaluator jev` to select it and save the provider/model pair. The equivalent `evaluator` override in `<agent-dir>/extensions/auto-approve.json` is:
+
+```json
+{"evaluator": {"backend": "jev", "jev": {"provider": "cloudflare-workers-ai", "model": "typesafe/jev"}}}
+```
+
+Cloudflare AI Gateway is a proxy for TypeSafe, not Workers AI; keep `evaluator.jev.provider` set to `typesafe` for this setup.
 
 Cloudflare AI Gateway (one-time manual setup): create a Custom Provider with slug `typesafe` and base URL `https://api.typesafe.ai` (optionally with BYOK), then point the built-in provider at the gateway with a `~/.pi/agent/models.json` override, which preserves the built-in model:
 

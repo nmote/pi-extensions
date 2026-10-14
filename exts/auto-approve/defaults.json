@@ -34,6 +34,6 @@
     "timeoutMs": 20000,
     "memoize": true,
     "backend": "chat",
-    "jev": { "model": "jev-latest" }
+    "jev": { "provider": "typesafe", "model": "jev-latest" }
   }
 }

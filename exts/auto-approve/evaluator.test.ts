@@ -14,7 +14,7 @@ function check(name: string, condition: boolean): void {
 }
 
 const model = {} as Model<any>;
-const config: EvaluatorConfig = { reasoningEffort: "low", timeoutMs: 1000, memoize: true, backend: "chat", jev: { model: "jev-latest" } };
+const config: EvaluatorConfig = { reasoningEffort: "low", timeoutMs: 1000, memoize: true, backend: "chat", jev: { provider: "typesafe", model: "jev-latest" } };
 
 function context(
 	stopReason: string,

@@ -13,7 +13,7 @@ function check(name: string, condition: boolean): void {
 }
 
 const model = {} as ClassifierModel<never>;
-const config: EvaluatorConfig = { reasoningEffort: "low", timeoutMs: 1000, memoize: true, backend: "jev", jev: { model: "jev-latest" } };
+const config: EvaluatorConfig = { reasoningEffort: "low", timeoutMs: 1000, memoize: true, backend: "jev", jev: { provider: "typesafe", model: "jev-latest" } };
 
 function choiceAnswer(choice: string, confidence: number, probability = 0.97): ClassifierResult {
 	return {

@@ -87,12 +87,15 @@ try {
 		check("non-boolean logEvaluations stays disabled", loadConfig().logEvaluations === false);
 		writeFileSync(localConfig, "{}");
 		check("logEvaluations defaults to disabled", loadConfig().logEvaluations === false);
-		writeFileSync(localConfig, '{"defaultMode":"invalid","evaluator":{"reasoningEffort":"invalid","timeoutMs":0,"memoize":"yes","backend":"invalid","jev":{"model":""}}}');
+		writeFileSync(localConfig, '{"defaultMode":"invalid","evaluator":{"reasoningEffort":"invalid","timeoutMs":0,"memoize":"yes","backend":"invalid","jev":{"provider":"","model":""}}}');
 		check("invalid values fall back to bundled settings", JSON.stringify(loadConfig()) === JSON.stringify(missing));
-		check("bundled backend defaults to chat", missing.evaluator.backend === "chat" && missing.evaluator.jev.model === "jev-latest");
+		check("bundled backend defaults to chat", missing.evaluator.backend === "chat" && missing.evaluator.jev.provider === "typesafe" && missing.evaluator.jev.model === "jev-latest");
 		writeFileSync(localConfig, '{"evaluator":{"backend":"jev","jev":{"model":"jev-custom"}}}');
 		const jev = loadConfig();
-		check("jev backend and model are parsed", jev.evaluator.backend === "jev" && jev.evaluator.jev.model === "jev-custom" && jev.evaluator.reasoningEffort === "medium");
+		check("jev backend and model are parsed", jev.evaluator.backend === "jev" && jev.evaluator.jev.provider === "typesafe" && jev.evaluator.jev.model === "jev-custom" && jev.evaluator.reasoningEffort === "medium");
+		writeFileSync(localConfig, '{"evaluator":{"backend":"jev","jev":{"provider":"cloudflare-workers-ai","model":"typesafe/jev"}}}');
+		const workers = loadConfig();
+		check("Workers AI provider and model are parsed", workers.evaluator.jev.provider === "cloudflare-workers-ai" && workers.evaluator.jev.model === "typesafe/jev");
 		writeFileSync(localConfig, '{"imports":["builtin:defaults","builtin:bad"],"allow":[{"tool":"bash","pattern":".*"}]}');
 		const failed = loadConfig({ seed: true });
 		check("bad import fails closed without partially granting the preset", failed.defaultMode === "manual" && emptyPolicy(failed));
@@ -112,7 +115,7 @@ try {
 			const unavailable = isolatedConfig.loadConfig();
 			check(`unavailable bundled settings fail closed (${content ?? "missing"})`, unavailable.defaultMode === "manual" && emptyPolicy(unavailable));
 		}
-		writeFileSync(isolatedPreset, JSON.stringify({ ...preset, defaultMode: "manual", evaluator: { reasoningEffort: "high", timeoutMs: 12345, memoize: false, backend: "jev", jev: { model: "jev-test" } } }));
+		writeFileSync(isolatedPreset, JSON.stringify({ ...preset, defaultMode: "manual", evaluator: { reasoningEffort: "high", timeoutMs: 12345, memoize: false, backend: "jev", jev: { provider: "typesafe", model: "jev-test" } } }));
 		const authoritative = isolatedConfig.loadConfig();
 		check("bundled file is authoritative without importing its policy", authoritative.defaultMode === "manual" && emptyPolicy(authoritative) && authoritative.evaluator.reasoningEffort === "high" && authoritative.evaluator.timeoutMs === 12345 && !authoritative.evaluator.memoize && authoritative.evaluator.backend === "jev" && authoritative.evaluator.jev.model === "jev-test");
 	} finally {
@@ -163,9 +166,9 @@ try {
 	const fresh = join(files, "new", "auto-approve.json");
 	saveEvaluatorEffort("medium", fresh);
 	check("saving effort creates a local config", JSON.parse(readFileSync(fresh, "utf8")).evaluator.reasoningEffort === "medium");
-	saveEvaluatorBackend("jev", fresh);
+	saveEvaluatorBackend("jev", fresh, { provider: "cloudflare-workers-ai", model: "typesafe/jev" });
 	const savedBackend = JSON.parse(readFileSync(fresh, "utf8")).evaluator;
-	check("saving backend preserves other evaluator fields", savedBackend.backend === "jev" && savedBackend.reasoningEffort === "medium");
+	check("saving backend preserves other evaluator fields", savedBackend.backend === "jev" && savedBackend.reasoningEffort === "medium" && savedBackend.jev.provider === "cloudflare-workers-ai" && savedBackend.jev.model === "typesafe/jev");
 	const malformed = file("malformed.json", "{oops");
 	expectError("saving effort rejects invalid config", () => saveEvaluatorEffort("high", malformed), "could not parse");
 	check("invalid config is not overwritten", readFileSync(malformed, "utf8") === "{oops");

@@ -187,6 +187,7 @@ async function main(): Promise<void> {
 				input: { command },
 				instructions: [scope],
 				effort: "low",
+				evaluator: "chat model (managed by /small-model)",
 				output: { decision: "review", reason: "consequential operation" },
 			},
 		};
@@ -200,6 +201,7 @@ async function main(): Promise<void> {
 				input: { path: metadataPath, content: "" },
 				instructions: [scope],
 				effort: "low",
+				evaluator: "chat model (managed by /small-model)",
 				output: { decision: "review", reason: "repository metadata" },
 			},
 		};
@@ -774,8 +776,8 @@ async function main(): Promise<void> {
 		let classifications = 0;
 		const jevCtx = { ...ctx, modelRegistry: {
 			...ctx.modelRegistry,
-			findOfType: () => ({ provider: "typesafe", id: "jev-latest" }),
-			getProviderAuthStatus: () => ({ configured: true }),
+			findOfType: (_type: string, provider: string, id: string) => provider === "typesafe" ? { provider, id } : undefined,
+			getProviderAuthStatus: (provider: string) => ({ configured: provider === "typesafe" }),
 			classify: async () => {
 				classifications++;
 				return { stopReason: "stop", answers: { verdict: {
@@ -792,6 +794,83 @@ async function main(): Promise<void> {
 		check("cached Jev rejection avoids classifier and chat calls", classifications === 1 && evaluatorRequests.length === chatCalls + 1);
 		await commands.get("auto").handler("test jev-review", jevCtx);
 		check("auto test explains Jev reviews", notices.at(-1)?.includes("REVIEW\nNeeds human judgment.") === true && classifications === 2);
+
+		let authenticated = ["cloudflare-workers-ai"];
+		let modelMissing = false;
+		let onClassify: (() => Promise<void>) | undefined;
+		const classifierModels: string[] = [];
+		const workersCtx = { ...jevCtx, modelRegistry: {
+			...jevCtx.modelRegistry,
+			findOfType: (_type: string, provider: string, id: string) => modelMissing ? undefined : { provider, id },
+			getProviderAuthStatus: (provider: string) => ({ configured: authenticated.includes(provider) }),
+			classify: async (model: { provider: string; id: string }) => {
+				classifierModels.push(`${model.provider}/${model.id}`);
+				if (onClassify) {
+					const change = onClassify;
+					onClassify = undefined;
+					await change();
+					return { stopReason: "stop", answers: { verdict: {
+						type: "choice", choice: "allow", probabilities: { allow: 0.99 }, confidence: 0.99,
+					} } };
+				}
+				return jevCtx.modelRegistry.classify();
+			},
+		} };
+		const prompts: string[] = [];
+		select = async (title, choices) => {
+			prompts.push(title);
+			return title.startsWith("Evaluator backend") ? "Jev" : choices.find((choice) => choice.startsWith("cloudflare-workers-ai"));
+		};
+		await commands.get("auto").handler("evaluator", workersCtx);
+		const savedWorkers = JSON.parse(readFileSync(configFile, "utf8")).evaluator;
+		check("one authenticated Jev provider skips the provider picker and saves its model",
+			prompts.length === 1 && savedWorkers.backend === "jev" && savedWorkers.jev.provider === "cloudflare-workers-ai" && savedWorkers.jev.model === "typesafe/jev");
+		await commands.get("auto").handler("test workers-review", workersCtx);
+		check("auto test classifies through Workers AI", classifierModels.at(-1) === "cloudflare-workers-ai/typesafe/jev" && notices.at(-1)?.includes("REVIEW\nNeeds human judgment.") === true);
+		await commands.get("auto").handler("", workersCtx);
+		check("status names the configured Jev provider", notices.at(-1)?.includes("jev (cloudflare-workers-ai/typesafe/jev)") === true);
+
+		// Cached verdicts from a different provider cannot authorize this provider's calls.
+		resumedEntries = entries.map((entry) => ({ type: "custom", ...entry }));
+		await handlers.get("session_start")?.[0]?.({}, workersCtx);
+		const beforeRestored = classifications;
+		await gate({ toolName: "bash", input: { command: "jev-review" } }, workersCtx);
+		check("resume does not restore another Jev provider's verdict", classifications === beforeRestored + 1 && classifierModels.at(-1) === "cloudflare-workers-ai/typesafe/jev");
+
+		authenticated = ["typesafe", "cloudflare-workers-ai"];
+		prompts.length = 0;
+		await commands.get("auto").handler("evaluator jev", workersCtx);
+		check("explicit Jev selection prompts when multiple providers are available", prompts.length === 1 && prompts[0] === "Jev provider:");
+		const beforeCancel = readFileSync(configFile, "utf8");
+		select = async () => undefined;
+		await commands.get("auto").handler("evaluator jev", workersCtx);
+		check("cancelling provider selection preserves saved settings", readFileSync(configFile, "utf8") === beforeCancel);
+		await commands.get("auto").handler("", workersCtx);
+		check("cancelling provider selection preserves runtime settings", notices.at(-1)?.includes("jev (cloudflare-workers-ai/typesafe/jev)") === true);
+
+		authenticated = [];
+		await commands.get("auto").handler("evaluator jev", workersCtx);
+		check("no authenticated providers leaves settings unchanged and explains setup", readFileSync(configFile, "utf8") === beforeCancel && notices.at(-1)?.includes("no authenticated Jev provider") === true);
+		const beforeUnavailable = classifications;
+		await commands.get("auto").handler("test missing-auth", workersCtx);
+		check("missing Workers AI authentication fails closed with provider guidance", classifications === beforeUnavailable && notices.some((notice) => notice.includes("credentials missing") && notice.includes("/login cloudflare-workers-ai")));
+		authenticated = ["cloudflare-workers-ai"];
+		modelMissing = true;
+		await commands.get("auto").handler("test missing-model", workersCtx);
+		check("missing classifier fails closed with a distinct diagnostic", classifications === beforeUnavailable && notices.some((notice) => notice.includes("Jev model cloudflare-workers-ai/typesafe/jev not found")));
+		modelMissing = false;
+		prompts.length = 0;
+		select = async (title) => { prompts.push(title); return undefined; };
+		await commands.get("auto").handler("evaluator jev", { ...workersCtx, hasUI: false });
+		check("headless selection also skips a sole provider", prompts.length === 0 && notices.at(-1)?.includes("jev (cloudflare-workers-ai/typesafe/jev)") === true);
+
+		authenticated = ["typesafe", "cloudflare-workers-ai"];
+		select = async (_title, choices) => choices.find((choice) => choice.startsWith("typesafe"));
+		onClassify = async () => { await commands.get("auto").handler("evaluator jev", workersCtx); };
+		const beforeSwitch = classifierModels.length;
+		const switched = await gate({ toolName: "bash", input: { command: "switch-provider-in-flight" } }, workersCtx);
+		check("provider changes discard in-flight allows and retry with the selected provider",
+			switched?.block === true && JSON.stringify(classifierModels.slice(beforeSwitch)) === JSON.stringify(["cloudflare-workers-ai/typesafe/jev", "typesafe/jev-latest"]));
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

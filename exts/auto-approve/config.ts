@@ -76,7 +76,7 @@ export interface EvaluatorConfig {
 	/** Evaluator backend: the shared small chat model, or the Jev classifier. */
 	backend: EvaluatorBackend;
 	/** Jev backend settings. Endpoint/gateway overrides live in models.json. */
-	jev: { model: string };
+	jev: { provider: string; model: string };
 }
 
 export interface AutoApproveConfig {
@@ -102,6 +102,7 @@ function engineDefaults(): Pick<AutoApproveConfig, "defaultMode" | "evaluator"> 
 	if (!isMode(raw.defaultMode) || !evaluator || !isEffort(evaluator.reasoningEffort) ||
 		typeof evaluator.timeoutMs !== "number" || !Number.isFinite(evaluator.timeoutMs) || evaluator.timeoutMs <= 0 ||
 		typeof evaluator.memoize !== "boolean" || !isBackend(evaluator.backend) ||
+		typeof evaluator.jev?.provider !== "string" || !evaluator.jev.provider.trim() ||
 		typeof evaluator.jev?.model !== "string" || !evaluator.jev.model.trim()) {
 		throw new ImportResolutionError("auto-approve: invalid bundled engine settings");
 	}
@@ -155,8 +156,8 @@ export function saveEvaluatorEffort(effort: EvaluatorConfig["reasoningEffort"], 
 	saveEvaluatorFields({ reasoningEffort: effort }, path);
 }
 
-export function saveEvaluatorBackend(backend: EvaluatorBackend, path = configPath()): void {
-	saveEvaluatorFields({ backend }, path);
+export function saveEvaluatorBackend(backend: EvaluatorBackend, path = configPath(), jev?: EvaluatorConfig["jev"]): void {
+	saveEvaluatorFields({ backend, ...(jev ? { jev } : {}) }, path);
 }
 
 function saveEvaluatorFields(fields: Record<string, unknown>, path: string): void {
@@ -323,7 +324,7 @@ export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 		return {
 			defaultMode: "manual", allow: [], deny: [], context: [], writeRoots: [], readRoots: [],
 			// Manual mode does not evaluate unmatched calls.
-			evaluator: defaults?.evaluator ?? { reasoningEffort: "low", timeoutMs: 0, memoize: false, backend: "chat", jev: { model: "jev-latest" } },
+			evaluator: defaults?.evaluator ?? { reasoningEffort: "low", timeoutMs: 0, memoize: false, backend: "chat", jev: { provider: "typesafe", model: "jev-latest" } },
 			logEvaluations: false,
 		};
 	}
@@ -344,6 +345,7 @@ export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 			memoize: typeof rawEval.memoize === "boolean" ? rawEval.memoize : defaults.evaluator.memoize,
 			backend: isBackend(rawEval.backend) ? rawEval.backend : defaults.evaluator.backend,
 			jev: {
+				provider: typeof rawJev?.provider === "string" && rawJev.provider.trim() ? rawJev.provider : defaults.evaluator.jev.provider,
 				model: typeof rawJev?.model === "string" && rawJev.model.trim() ? rawJev.model : defaults.evaluator.jev.model,
 			},
 		},

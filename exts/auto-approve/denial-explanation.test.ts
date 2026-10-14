@@ -12,7 +12,7 @@ const temp = mkdtempSync(join(tmpdir(), "jev-explanation-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = temp;
 try {
-	const config: EvaluatorConfig = { timeoutMs: 10, reasoningEffort: "low", memoize: true, backend: "jev", jev: { model: "jev-latest" } };
+	const config: EvaluatorConfig = { timeoutMs: 10, reasoningEffort: "low", memoize: true, backend: "jev", jev: { provider: "typesafe", model: "jev-latest" } };
 	const review: EvaluationResult = { decision: "review", reason: "review (p=0.97, confidence=0.91)", attempt: {
 		stopReason: "stop", usage: null, responseModel: "jev-latest", providerThinkingLevel: null,
 	} };

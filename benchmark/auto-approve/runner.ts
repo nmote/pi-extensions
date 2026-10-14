@@ -70,7 +70,7 @@ export async function runEvaluations(options: RunOptions): Promise<Outcome[]> {
 				cwd: value.cwd, signal: options.signal, modelRegistry: options.modelRegistry,
 			}, value.tool, value.input, {
 				reasoningEffort: options.effort, timeoutMs: options.timeoutMs, memoize: false,
-				backend: "chat", jev: { model: "jev-latest" },
+				backend: "chat", jev: { provider: "typesafe", model: "jev-latest" },
 			}, instructions[index], value.sessionGuidance);
 			options.signal?.throwIfAborted();
 			const usage = tokenUsage(result);
