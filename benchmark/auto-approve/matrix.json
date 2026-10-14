@@ -1,0 +1,6 @@
+[
+  { "provider": "openai", "model": "gpt-6-luna", "effort": "medium" },
+  { "provider": "fireworks", "model": "accounts/fireworks/models/deepseek-v4p1-flash", "effort": "medium" },
+  { "provider": "anthropic", "model": "claude-haiku-5-5", "effort": "medium" },
+  { "provider": "fireworks", "model": "accounts/fireworks/models/glm-5p3-flash", "effort": "medium" }
+]

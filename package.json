@@ -12,7 +12,8 @@
   "scripts": {
     "test": "./scripts/test",
     "check": "./scripts/check",
-    "benchmark:auto-approve": "tsx benchmark/auto-approve/run.ts"
+    "benchmark:auto-approve": "tsx benchmark/auto-approve/run.ts",
+    "benchmark:auto-approve:matrix": "tsx benchmark/auto-approve/matrix.ts"
   },
   "pi": {
     "extensions": [

@@ -55,6 +55,46 @@ writes an additional JSON copy; existing files are never overwritten.
 prompts, raw responses, or credentials. Keep reports private when using
 nonpublic cases or rationales.
 
+### Evaluator matrix
+
+```sh
+# Offline validation and planned request counts; no auth or logs.
+npm run --silent benchmark:auto-approve:matrix -- --dry-run
+
+# Billable: runs each available evaluator serially, without retries.
+npm run --silent benchmark:auto-approve:matrix
+```
+
+`matrix.json` pins OpenAI `gpt-6-luna`, Fireworks
+`accounts/fireworks/models/deepseek-v4p1-flash`, and Anthropic
+`claude-haiku-5-5`, plus Fireworks `accounts/fireworks/models/glm-5p3-flash`,
+all at medium effort. Models are never substituted.
+The command accepts shared `--cases`, `--repetitions`, `--timeout-ms`,
+`--auth-path`, and `--log-dir` options with the single-run defaults.
+Dry-run validates the matrix and reconstructs inputs through the single-run
+command; it does not check model availability.
+
+Actual runs check the built-in physical chat-model catalog, without custom
+models or network refresh. Unavailable models and failed runs do not prevent
+later entries from running. Stdout shows only evaluator labels, review-positive
+precision, recall, F2, unanimous/mixed/insufficient consistency counts, and
+average estimated cost per evaluation in USD, and average latency in
+milliseconds. Latency includes request/auth time for valid and failed attempts.
+Cost uses the report's average over attempts with known cost, including failures;
+it is a catalog estimate, not provider billing. Unknown costs, absent latency,
+and missing scores are `n/a`. Failed
+attempts remain excluded from score denominators; stderr warns when a report
+excludes failures.
+
+Each invocation creates a private, unique `matrix-*` directory under
+`logs/auto-approve/` (or `--log-dir`), containing `summary.txt`, `manifest.json`,
+and numbered evaluator directories. The manifest records statuses and paths
+to each evaluator's `report.txt`, schema-validated `results.json`, and captured
+stdout/stderr. Progress, warnings, and log paths go to stderr. Exit status is
+zero only if every entry completes without failures; scores do not affect it.
+Ctrl-C stops scheduling, terminates the active child, preserves completed logs,
+and exits 130. An interrupted evaluator may have no report.
+
 ### Authentication
 
 Uses Pi's built-in physical chat models and normal auth, without sessions,
