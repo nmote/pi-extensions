@@ -7,7 +7,8 @@ import { parseJsonObject } from "../shared/model-json.ts";
 
 const MAX_CURRENT_TOPIC_CHARS = 200;
 const MAX_PROMPT_CHARS = 2_000;
-const MAX_WORK_SUMMARY_CHARS = 1_200;
+// Fits the 100–150-word target; longer output is middle-truncated.
+const MAX_WORK_SUMMARY_CHARS = 1_600;
 const MAX_REQUEST_CONTEXT_CHARS = 4_000;
 const MAX_OUTCOME_CONTEXT_CHARS = 5_000;
 const MAX_TOOL_CONTEXT_CHARS = 800;

@@ -167,7 +167,7 @@ async function main(): Promise<void> {
 	check("model context retains long-prompt endings", boundedValue.latestPrompt.endsWith(longTail));
 	check("current topics are bounded by code point", pointLength(boundedValue.currentTopic) <= 200);
 	check("latest prompts are bounded by code point", pointLength(boundedValue.latestPrompt) <= 2_000);
-	check("persisted work summaries are bounded", pointLength(boundedValue.workSummary) <= 1_200);
+	check("persisted work summaries are bounded", pointLength(boundedValue.workSummary) <= 1_600);
 	check(
 		"completed-work sections respect their aggregate bounds",
 		totalPoints(boundedValue.workSinceLastSummary.requests) <= 4_000 &&
