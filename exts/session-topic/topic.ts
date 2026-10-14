@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { Model, StopReason, Usage } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import type { Model, StopReason, ThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ItemReference } from "../backlog/store.ts";
 import { parseJsonObject } from "../shared/model-json.ts";
@@ -319,6 +320,13 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+// Omitting `reasoning` disables it only on models whose levels include "off";
+// elsewhere it yields the provider default (e.g. high effort on Haiku 5.5).
+function lowestReasoning(model: Model<any>): ThinkingLevel | undefined {
+	const lowest = getSupportedThinkingLevels(model)[0];
+	return lowest === undefined || lowest === "off" ? undefined : lowest;
+}
+
 async function generateMetadata(
 	model: Model<any>,
 	ctx: ExtensionContext,
@@ -343,6 +351,7 @@ async function generateMetadata(
 		termination = "timeout";
 		controller.abort();
 	}, timeoutMs);
+	const reasoning = lowestReasoning(model);
 
 	try {
 		const response = await ctx.modelRegistry
@@ -361,6 +370,7 @@ async function generateMetadata(
 				{
 					signal: controller.signal,
 					maxTokens,
+					...(reasoning ? { reasoning } : {}),
 					cacheRetention: "none",
 					sessionId: `${sessionIdPrefix}-${randomUUID()}`,
 				},

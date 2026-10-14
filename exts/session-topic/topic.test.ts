@@ -457,6 +457,17 @@ async function main(): Promise<void> {
 		JSON.stringify(JSON.parse(requestContext?.messages?.[0]?.content?.[0]?.text)) ===
 			JSON.stringify({ latestPrompt: topicInput.latestPrompt }),
 	);
+	await generatePromptSummary(
+		{
+			...model,
+			reasoning: true,
+			thinkingLevelMap: { off: null, minimal: null, low: "low", high: "high" },
+		} as Model<any>,
+		ctx,
+		{ latestPrompt: topicInput.latestPrompt },
+		new AbortController().signal,
+	);
+	check("metadata calls use the lowest level when reasoning cannot be disabled", options?.reasoning === "low");
 	check("prompt-summary usage is returned", summary.usage.cost.total === 0.01);
 
 	let providerSignal: AbortSignal | undefined;
