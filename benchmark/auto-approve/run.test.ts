@@ -26,9 +26,10 @@ ModelRuntime.create = async (options) => {
 	assert.equal(options?.modelsPath, null);
 	assert.equal(options?.refreshOnCreate, false);
 	assert.equal(options?.allowModelNetwork, false);
-	return { getPhysicalModel: () => model,
+	return { getPhysicalModel: (provider: string) => provider === "offline" ? model : undefined,
 		getModelOfType: (type: string, provider: string, id: string) =>
-			type === "classifier" && provider === "typesafe" ? { id, provider, api: "typesafe-system-one" } : undefined,
+			type === "classifier" && ["typesafe", "cloudflare-workers-ai"].includes(provider)
+				? { id, provider, api: "typesafe-system-one", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } : undefined,
 		classify: async () => {
 			requests++;
 			return { stopReason: "stop", model: "jev-latest",
@@ -101,7 +102,7 @@ try {
 	assert.ok(isRunResult(JSON.parse(stdout)));
 	assert.equal((await readdir(logDir)).length, 2);
 
-	// Classifier path: the typesafe provider resolves a built-in classifier and evaluates via classify().
+	// Classifiers use the same evaluation policy across providers.
 	stdout = "";
 	const jevArgs = ["--provider", "typesafe", "--model", "jev-latest", "--log-dir", logDir, "--repetitions", "1", "--json"];
 	assert.equal(await main(jevArgs), 0);
@@ -115,6 +116,16 @@ try {
 	assert.equal(jevOutcome.result.verdict, "allow");
 	assert.equal(jevOutcome.result.reason, "allow (p=0.97, confidence=0.91)");
 	assert.equal(jevOutcome.estimatedCostUsd, 50 * 0.042 / 1e6);
+	stdout = "";
+	assert.equal(await main(["--provider", "cloudflare-workers-ai", "--model", "typesafe/jev", "--type", "classifier",
+		"--log-dir", logDir, "--repetitions", "1", "--json"]), 0);
+	const cloudflareReport = JSON.parse(stdout);
+	assert.ok(isRunResult(cloudflareReport));
+	assert.deepEqual(cloudflareReport.modelIdentity.pricing, jevReport.modelIdentity.pricing);
+	assert.equal(cloudflareReport.outcomes[0].estimatedCostUsd, 50 * 0.042 / 1e6);
+	assert.equal(cloudflareReport.usage.averageEstimatedCostUsd, 50 * 0.042 / 1e6);
+	assert.equal((cloudflareReport.modelIdentity as Record<string, unknown>).questionSchemaHash, jevIdentity.questionSchemaHash);
+	assert.deepEqual(cloudflareReport.outcomes[0].result, jevOutcome.result);
 } finally {
 	ModelRuntime.create = originalCreate;
 	process.stdout.write = originalWrite;

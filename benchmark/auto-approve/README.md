@@ -33,12 +33,15 @@ npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-lates
 npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-latest
 ```
 
-`--provider typesafe` resolves a built-in classifier model and evaluates each
-case with one structured `classify()` call; an `allow` verdict requires
+Classifier models from any built-in provider evaluate each case with one
+structured `classify()` call; an `allow` verdict requires
 confidence ≥ 0.5. Jev returns no prose, so outcome reasons are synthesized
-from the choice probabilities. Its catalog pricing is all-zero (unknown), so
-the report records the published rate manually ($0.042 per million input
-tokens; output is free).
+from the choice probabilities. TypeSafe `jev-latest` and Cloudflare
+`typesafe/jev` use their published rate ($0.042 per million input tokens;
+output is free); other bindings use catalog pricing, with all-zero prices
+treated as unknown.
+`--type chat|classifier` selects the backend explicitly; otherwise the runner
+prefers a physical chat model and falls back to a classifier with the exact ID.
 
 Use `--help` for options. Defaults: low effort, 30-second timeout, three
 repetitions. Two repetitions are supported. Cases default to this directory's
@@ -72,24 +75,51 @@ nonpublic cases or rationales.
 # Offline validation and planned request counts; no auth or logs.
 npm run --silent benchmark:auto-approve:matrix -- --dry-run
 
+# Preview provider selection using local auth, without inference or logs.
+npm run --silent benchmark:auto-approve:matrix -- --resolve-only
+
 # Billable: runs each available evaluator serially, without retries.
 npm run --silent benchmark:auto-approve:matrix
 ```
 
-`matrix.json` pins OpenAI `gpt-6-luna`, Fireworks
-`accounts/fireworks/models/deepseek-v4p1-flash`, and Anthropic
-`claude-haiku-5-5`, plus Fireworks `accounts/fireworks/models/glm-5p3-flash`,
-all at medium effort, and TypeSafe `jev-latest` at low effort (effort is inert
-for the classifier). Models are never substituted.
+`matrix.json` defines stable evaluator IDs, backend kinds, effort, and ordered
+exact provider/model candidates:
+
+- `luna`: OpenAI, then OpenAI Codex `gpt-6-luna`
+- `deepseek`: Fireworks V4.1 Flash, then Cloudflare V4 Flash 0731
+- `haiku`: Anthropic `claude-haiku-5-5`
+- `glm`: Fireworks, then Cloudflare GLM 5.3 Flash
+- `jev`: TypeSafe `jev-latest`, then Cloudflare `typesafe/jev`
+
+Chat rows use medium effort; Jev uses inert low effort. DeepSeek's two versions
+are intentional alternatives. Selection uses the first exact candidate with
+locally configured authentication and the correct model type. It is fixed
+before execution; request failures never trigger provider fallback. Authentication
+checks do not prove remote access or valid credentials.
+
+Use `--bindings PATH` for machine-local overrides, without changing the matrix:
+
+```json
+{
+  "luna": { "provider": "openai-codex", "model": "gpt-6-luna" },
+  "jev": { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
+}
+```
+
+Unspecified IDs use automatic selection. Unknown IDs, malformed bindings, and
+unavailable explicit bindings fail before inference; explicit bindings never
+fall back. Binding files contain model identities, not credentials.
+
 The command accepts shared `--cases`, `--repetitions`, `--timeout-ms`,
 `--auth-path`, and `--log-dir` options with the single-run defaults.
-Dry-run validates the matrix and reconstructs inputs through the single-run
-command; it does not check model availability.
+Dry-run validates the matrix/bindings and reconstructs inputs through the
+single-run command; it initializes no auth and leaves providers unresolved.
+`--resolve-only` checks local availability without inference or logs; it cannot
+be combined with `--dry-run`.
 
-Actual runs check the built-in physical chat-model catalog (the built-in
-classifier catalog for the typesafe entry), without custom models or network
-refresh. Unavailable models and failed runs do not prevent
-later entries from running. Stdout shows only evaluator labels, review-positive
+Actual runs use built-in physical chat/classifier models, without custom models
+or network catalog refresh. Unavailable automatic rows and failed runs do not
+prevent later entries from running. Stdout shows only evaluator labels, review-positive
 precision, recall, F2, unanimous/mixed/insufficient consistency counts,
 average estimated cost per evaluation in USD, the full estimated run cost in
 USD, and average latency in milliseconds. A final row totals the run costs; a
@@ -104,8 +134,8 @@ excludes failures.
 
 Each invocation creates a private, unique `matrix-*` directory under
 `logs/auto-approve/` (or `--log-dir`), containing `summary.txt`, `manifest.json`,
-and numbered evaluator directories. The manifest records statuses and paths
-to each evaluator's `report.txt`, schema-validated `results.json`, and captured
+and numbered evaluator directories. The version-2 manifest records logical evaluator IDs, kinds, candidate lists,
+resolved provider/model pairs, statuses, and paths to each evaluator's `report.txt`, schema-validated `results.json`, and captured
 stdout/stderr. Progress, warnings, and log paths go to stderr. Exit status is
 zero only if every entry completes without failures; scores do not affect it.
 Ctrl-C stops scheduling, terminates the active child, preserves completed logs,
@@ -113,14 +143,15 @@ and exits 130. An interrupted evaluator may have no report.
 
 ### Authentication
 
-Uses Pi's built-in physical chat models (or the built-in `typesafe`
-classifier) and normal auth, without sessions,
+Uses Pi's built-in physical chat/classifier models and normal auth, without sessions,
 settings, extensions, live approval configuration/guidance, `models.json`,
 or network catalog refresh. Use `--auth-path` to override the credential
 file; otherwise Pi's normal agent directory applies. For `typesafe`, set
-`TYPESAFE_API_KEY` or store a credential with `/login typesafe`. Because
-`models.json` is not read, a Cloudflare AI Gateway provider override does not
-apply to the benchmark; runs always use the built-in TypeSafe endpoint. Stored credentials take
+`TYPESAFE_API_KEY` or store a credential with `/login typesafe`. Cloudflare Workers AI uses
+`CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID`, or its normal Pi login.
+Because `models.json` is not read, Cloudflare AI Gateway overrides do not apply;
+select `cloudflare-workers-ai/typesafe/jev` to use Cloudflare's built-in endpoint.
+Stored credentials take
 precedence over provider environment/ambient credentials. No API-key flag is
 provided; use provider environment variables for keys without shell-history
 exposure. Credential-file overrides do not disable ambient credentials.
@@ -240,7 +271,7 @@ identifies replay with both fictional installation and bundled preset roots.
 Model identity records installed Pi versions, selected capabilities, catalog
 pricing, and a hash of selected
 metadata including thinking/sampling defaults. Classifier runs instead record
-the API, a hash of the static question schema, and manually recorded pricing. Requested effort is not proof
+the API, a hash of the static question schema, and selected-provider pricing. Requested effort is not proof
 of effective effort; reported provider effort/response model remain null when
 unavailable.
 

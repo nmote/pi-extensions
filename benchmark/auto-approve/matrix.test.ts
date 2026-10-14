@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { main, loadMatrix, matrixOptions, formatMatrix } from "./matrix.ts";
+import { main, loadMatrix, loadBindings, resolveEntry, matrixOptions, formatMatrix } from "./matrix.ts";
 import { isRunResult, loadCases, type Outcome, type RunResult } from "./contracts.ts";
 import { calculateAggregates, summarizeLatency, summarizeUsage } from "./metrics.ts";
 
@@ -24,8 +24,24 @@ process.env.MATRIX_TEST_DIR = directory;
 try {
 	assert.throws(() => loadMatrix([]), /nonempty/);
 	assert.throws(() => loadMatrix([{ provider: "p", model: "m", effort: "invalid" }]), /Invalid/);
-	const entry = { provider: "p", model: "m", effort: "low" };
+	const entry = { id: "fixture", kind: "chat" as const, effort: "low" as const,
+		candidates: [{ provider: "p", model: "m" }, { provider: "q", model: "other" }] };
 	assert.throws(() => loadMatrix([entry, entry]), /Duplicate/);
+	assert.throws(() => loadMatrix([{ ...entry, candidates: [entry.candidates[0], entry.candidates[0]] }]), /Duplicate/);
+	assert.throws(() => loadBindings({ unknown: entry.candidates[0] }, [entry]), /Invalid/);
+	assert.throws(() => loadBindings({ fixture: { provider: "p" } }, [entry]), /Invalid/);
+	const binding = loadBindings({ fixture: { provider: "local", model: "exact" } }, [entry]).fixture;
+	const candidates: string[] = [];
+	const selected = await resolveEntry(entry, undefined, async (candidate) => {
+		candidates.push(candidate.provider);
+		return candidate.provider === "q";
+	});
+	assert.deepEqual(candidates, ["p", "q"]);
+	assert.equal(selected?.model, "other");
+	assert.equal((await resolveEntry(entry, binding, async () => true))?.provider, "local");
+	await assert.rejects(resolveEntry(entry, binding, async () => false), /Explicit binding unavailable/);
+	assert.equal(await resolveEntry(entry, undefined, async () => false), undefined);
+	assert.throws(() => matrixOptions(["--dry-run", "--resolve-only"]), /mutually exclusive/);
 	assert.throws(() => matrixOptions(["--repetitions", "0"]), /positive/);
 	assert.equal(matrixOptions([]).repetitions, 3);
 	assert.equal(matrixOptions([]).timeoutMs, 30000);
@@ -100,10 +116,13 @@ if (args.includes('--dry-run')) {
 	process.env.MATRIX_TEST_MODE = "missing";
 	stdout = stderr = "";
 	const checked: string[] = [];
-	assert.equal(await main(args, { runner, available: async (entry) => { checked.push(entry.provider); return entry.provider !== "openai"; } }), 1);
-	assert.deepEqual(checked, ["openai", "fireworks", "anthropic", "fireworks", "typesafe"]);
+	assert.equal(await main(args, { runner, available: async (entry) => { checked.push(entry.provider); return entry.provider !== "openai" && entry.provider !== "openai-codex"; } }), 1);
+	assert.deepEqual(checked, ["openai", "openai-codex", "fireworks", "anthropic", "fireworks", "typesafe"]);
 	const first = join(logDir, (await readdir(logDir))[0]);
 	const manifest = JSON.parse(await readFile(join(first, "manifest.json"), "utf8"));
+	assert.equal(manifest.schemaVersion, 2);
+	assert.equal(manifest.entries[0].id, "luna");
+	assert.equal(manifest.entries[0].provider, undefined);
 	assert.deepEqual(manifest.entries.map((row: { status: string }) => row.status), ["unavailable", "failed", "completed", "completed", "completed"]);
 	assert.equal(stdout, `${await readFile(join(first, "summary.txt"), "utf8")}`);
 	assert.match(stdout, /n\/a/);
@@ -142,19 +161,20 @@ if (args.includes('--dry-run')) {
 		assert.equal(options?.refreshOnCreate, false);
 		assert.equal(options?.allowModelNetwork, false);
 		assert.equal(options?.authPath, join(directory, "custom auth.json"));
-		return { getPhysicalModel: (provider: string, model: string) => {
-			catalogChecks.push(`${provider}/${model}`);
-			return {};
-		}, getModelOfType: (type: string, provider: string, model: string) => {
-			catalogChecks.push(`${type}:${provider}/${model}`);
-			return {};
-		} } as unknown as ModelRuntime;
+		return { getPhysicalModel: () => ({}),
+			getAvailableOfType: async (type: string, provider: string) => {
+				const entries = loadMatrix(JSON.parse(await readFile(resolve("benchmark/auto-approve/matrix.json"), "utf8")));
+				const models = entries.filter((entry) => entry.kind === type).flatMap((entry) => entry.candidates)
+					.filter((candidate) => candidate.provider === provider).map((candidate) => ({ id: candidate.model }));
+				catalogChecks.push(`${type}:${provider}`);
+				return models;
+			} } as unknown as ModelRuntime;
 	};
 	assert.equal(await main(args, { runner }), 1);
 	assert.equal(initialized, 1);
 	assert.equal(catalogChecks.length, 5);
-	assert.equal(catalogChecks[3], "fireworks/accounts/fireworks/models/glm-5p3-flash");
-	assert.equal(catalogChecks[4], "classifier:typesafe/jev-latest");
+	assert.equal(catalogChecks[3], "chat:fireworks");
+	assert.equal(catalogChecks[4], "classifier:typesafe");
 	const second = (await readdir(logDir)).find((name) => join(logDir, name) !== first)!;
 	const retained = JSON.parse(await readFile(join(logDir, second, "manifest.json"), "utf8"));
 	assert.deepEqual(retained.entries.map((row: { status: string }) => row.status), ["failed", "failed", "completed", "completed", "completed"]);
@@ -166,10 +186,10 @@ if (args.includes('--dry-run')) {
 	assert.equal(retained.entries[0].totalEstimatedCostUsd, null, "Full run cost is unknown when any attempt lacks cost");
 	assert.equal(retained.entries[0].averageLatencyMs, 1, "Latency includes failed attempts");
 	const costTable = formatMatrix([
-		{ provider: "p", model: "missing", effort: "low", status: "failed" },
-		{ provider: "p", model: "zero", effort: "low", status: "completed", averageEstimatedCostUsd: 0, totalEstimatedCostUsd: 0, averageLatencyMs: 0 },
-		{ provider: "p", model: "priced", effort: "low", status: "completed", totalEstimatedCostUsd: 1.25, averageLatencyMs: null },
-		{ provider: "p", model: "unknown", effort: "low", status: "completed", averageLatencyMs: null },
+		{ ...entry, provider: "p", model: "missing", status: "failed" },
+		{ ...entry, provider: "p", model: "zero", status: "completed", averageEstimatedCostUsd: 0, totalEstimatedCostUsd: 0, averageLatencyMs: 0 },
+		{ ...entry, provider: "p", model: "priced", status: "completed", totalEstimatedCostUsd: 1.25, averageLatencyMs: null },
+		{ ...entry, provider: "p", model: "unknown", status: "completed", averageLatencyMs: null },
 	]);
 	assert.match(costTable, /missing.*n\/a$/m);
 	assert.match(costTable, /zero.*\$0\.000000\s+\$0\.0000\s+0\.0$/m);
@@ -180,6 +200,30 @@ if (args.includes('--dry-run')) {
 	process.env.MATRIX_TEST_MODE = "success";
 	assert.equal(await main(args, { runner }), 0, "Scores do not determine exit status");
 	assert.equal((await readdir(logDir)).length, 3, "Runs do not overwrite logs");
+
+	const bindingsPath = join(directory, "bindings.json");
+	await writeFile(bindingsPath, JSON.stringify({ jev: { provider: "cloudflare-workers-ai", model: "typesafe/jev" } }));
+	const resolvedLogs = join(directory, "resolve-logs");
+	stdout = "";
+	const portable = async (candidate: { provider: string }) => candidate.provider === "cloudflare-workers-ai" || candidate.provider === "openai-codex" || candidate.provider === "anthropic";
+	assert.equal(await main(["--resolve-only", "--bindings", bindingsPath, "--log-dir", resolvedLogs], { runner, available: portable }), 0);
+	assert.match(stdout, /luna: openai-codex\/gpt-6-luna/);
+	assert.match(stdout, /deepseek: cloudflare-workers-ai\/@cf\/deepseek-ai\/deepseek-v4-flash-0731/);
+	assert.match(stdout, /jev: cloudflare-workers-ai\/typesafe\/jev \(classifier, low\)/);
+	await assert.rejects(stat(resolvedLogs), { code: "ENOENT" });
+	assert.equal(await main(["--bindings", bindingsPath, "--log-dir", resolvedLogs], { runner, available: portable }), 0);
+	const portableManifest = JSON.parse(await readFile(join(resolvedLogs, (await readdir(resolvedLogs))[0], "manifest.json"), "utf8"));
+	assert.equal(portableManifest.entries[0].provider, "openai-codex");
+	assert.equal(portableManifest.entries[4].kind, "classifier");
+	const jevForwarded = JSON.parse(await readFile(join(directory, "cloudflare-workers-ai-args.json"), "utf8"));
+	assert.equal(jevForwarded[jevForwarded.indexOf("--type") + 1], "classifier");
+	await assert.rejects(main(["--bindings", bindingsPath, "--resolve-only"], { runner, available: async () => false }), /Explicit binding unavailable/);
+
+	assert.equal(await main(["--resolve-only"], { runner, available: async (_entry, signal) => {
+		process.emit("SIGINT");
+		signal.throwIfAborted();
+		return true;
+	} }), 130, "Cancellation during model resolution exits 130");
 
 	process.env.MATRIX_TEST_MODE = "interrupt";
 	let signaled = false;

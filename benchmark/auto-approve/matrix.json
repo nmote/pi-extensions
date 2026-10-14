@@ -1,7 +1,21 @@
 [
-  { "provider": "openai", "model": "gpt-6-luna", "effort": "medium" },
-  { "provider": "fireworks", "model": "accounts/fireworks/models/deepseek-v4p1-flash", "effort": "medium" },
-  { "provider": "anthropic", "model": "claude-haiku-5-5", "effort": "medium" },
-  { "provider": "fireworks", "model": "accounts/fireworks/models/glm-5p3-flash", "effort": "medium" },
-  { "provider": "typesafe", "model": "jev-latest", "effort": "low" }
+  { "id": "luna", "kind": "chat", "effort": "medium", "candidates": [
+    { "provider": "openai", "model": "gpt-6-luna" },
+    { "provider": "openai-codex", "model": "gpt-6-luna" }
+  ] },
+  { "id": "deepseek", "kind": "chat", "effort": "medium", "candidates": [
+    { "provider": "fireworks", "model": "accounts/fireworks/models/deepseek-v4p1-flash" },
+    { "provider": "cloudflare-workers-ai", "model": "@cf/deepseek-ai/deepseek-v4-flash-0731" }
+  ] },
+  { "id": "haiku", "kind": "chat", "effort": "medium", "candidates": [
+    { "provider": "anthropic", "model": "claude-haiku-5-5" }
+  ] },
+  { "id": "glm", "kind": "chat", "effort": "medium", "candidates": [
+    { "provider": "fireworks", "model": "accounts/fireworks/models/glm-5p3-flash" },
+    { "provider": "cloudflare-workers-ai", "model": "@cf/zai-org/glm-5.3-flash" }
+  ] },
+  { "id": "jev", "kind": "classifier", "effort": "low", "candidates": [
+    { "provider": "typesafe", "model": "jev-latest" },
+    { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
+  ] }
 ]

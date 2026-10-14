@@ -7,8 +7,12 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { cliOptions } from "./run.ts";
 import { isRunResult, type RunResult } from "./contracts.ts";
 
-interface Entry { provider: string; model: string; effort: "low" | "medium" | "high" }
+interface Binding { provider: string; model: string }
+interface Entry { id: string; kind: "chat" | "classifier"; effort: "low" | "medium" | "high"; candidates: Binding[] }
+interface ResolvedEntry extends Binding { id: string; kind: Entry["kind"]; effort: Entry["effort"] }
 interface Row extends Entry {
+	provider?: string;
+	model?: string;
 	status: "pending" | "unavailable" | "failed" | "completed" | "interrupted";
 	exitCode?: number | null;
 	results?: string;
@@ -27,34 +31,65 @@ export function loadMatrix(value: unknown): Entry[] {
 	if (!Array.isArray(value) || !value.length) throw new Error("Matrix must be a nonempty array");
 	const seen = new Set<string>();
 	for (const entry of value) {
-		if (!entry || typeof entry !== "object" || Object.keys(entry).sort().join() !== "effort,model,provider" ||
-			typeof entry.provider !== "string" || !entry.provider.trim() ||
-			typeof entry.model !== "string" || !entry.model.trim() ||
-			!["low", "medium", "high"].includes(entry.effort)) throw new Error("Invalid matrix entry");
-		const key = JSON.stringify([entry.provider, entry.model, entry.effort]);
+		if (!entry || typeof entry !== "object" || Object.keys(entry).sort().join() !== "candidates,effort,id,kind" ||
+			typeof entry.id !== "string" || !entry.id.trim() || !["chat", "classifier"].includes(entry.kind) ||
+			!["low", "medium", "high"].includes(entry.effort) || !Array.isArray(entry.candidates) ||
+			!entry.candidates.length || !entry.candidates.every(isBinding)) throw new Error("Invalid matrix entry");
+		if (new Set(entry.candidates.map((candidate: Binding) => JSON.stringify([candidate.provider, candidate.model]))).size !== entry.candidates.length) {
+			throw new Error("Duplicate matrix candidate");
+		}
+		const key = entry.id;
 		if (seen.has(key)) throw new Error("Duplicate matrix entry");
 		seen.add(key);
 	}
 	return value;
 }
 
+function isBinding(value: unknown): value is Binding {
+	if (!value || typeof value !== "object") return false;
+	const binding = value as Binding;
+	return Object.keys(value).sort().join() === "model,provider" &&
+		typeof binding.provider === "string" && !!binding.provider.trim() &&
+		typeof binding.model === "string" && !!binding.model.trim();
+}
+
+export function loadBindings(value: unknown, entries: Entry[]): Record<string, Binding> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid bindings");
+	for (const [id, binding] of Object.entries(value)) {
+		if (!entries.some((entry) => entry.id === id) || !isBinding(binding)) throw new Error("Invalid evaluator binding");
+	}
+	return value as Record<string, Binding>;
+}
+
+export async function resolveEntry(entry: Entry, binding: Binding | undefined,
+	available: (entry: ResolvedEntry) => Promise<boolean>): Promise<ResolvedEntry | undefined> {
+	for (const candidate of binding ? [binding] : entry.candidates) {
+		const resolved = { id: entry.id, kind: entry.kind, effort: entry.effort, ...candidate };
+		if (await available(resolved)) return resolved;
+	}
+	if (binding) throw new Error(`Explicit binding unavailable: ${entry.id}`);
+	return undefined;
+}
+
 export function matrixOptions(args: string[]) {
 	const { values } = parseArgs({ args, allowPositionals: false, options: {
 		cases: { type: "string" }, repetitions: { type: "string" }, "timeout-ms": { type: "string" },
 		"auth-path": { type: "string" }, "log-dir": { type: "string" },
+		bindings: { type: "string" }, "resolve-only": { type: "boolean", default: false },
 		"dry-run": { type: "boolean", default: false }, help: { type: "boolean", default: false },
 	} });
-	const shared = Object.entries(values).flatMap(([key, value]) => typeof value === "string" ? [`--${key}`, value] : []);
+	if (values["dry-run"] && values["resolve-only"]) throw new Error("--dry-run and --resolve-only are mutually exclusive");
+	const shared = Object.entries(values).flatMap(([key, value]) => typeof value === "string" && key !== "bindings" ? [`--${key}`, value] : []);
 	const options = cliOptions(["--provider", "matrix", "--model", "matrix", ...shared]);
 	if (options.help) throw new Error("Unexpected help option");
-	return { ...options, help: values.help, dryRun: values["dry-run"], shared };
+	return { ...options, help: values.help, dryRun: values["dry-run"], resolveOnly: values["resolve-only"], bindings: values.bindings, shared };
 }
 
 export function formatMatrix(rows: Row[]): string {
 	const score = (value: number | null | undefined) => value == null ? "n/a" : value.toFixed(4);
 	const lines = rows.map((row) => {
 		const a = row.aggregates;
-		return [`${row.provider}/${row.model} (${row.effort})`, score(a?.precision), score(a?.recall), score(a?.f2),
+		return [`${row.id}: ${row.provider ? `${row.provider}/${row.model}` : "unavailable"} (${row.effort})`, score(a?.precision), score(a?.recall), score(a?.f2),
 			a ? `${a.consistency.unanimous}/${a.consistency.mixed}/${a.consistency.insufficient}` : "n/a",
 			row.averageEstimatedCostUsd == null ? "n/a" : `$${row.averageEstimatedCostUsd.toFixed(6)}`,
 			row.totalEstimatedCostUsd == null ? "n/a" : `$${row.totalEstimatedCostUsd.toFixed(4)}`,
@@ -106,7 +141,7 @@ async function childRun(runner: string, args: string[], signal: AbortSignal, log
 
 interface Dependencies {
 	runner?: string;
-	available?: (entry: Entry, signal: AbortSignal) => Promise<boolean>;
+	available?: (entry: ResolvedEntry, signal: AbortSignal) => Promise<boolean>;
 }
 
 export async function main(args: string[], dependencies: Dependencies = {}): Promise<number> {
@@ -118,61 +153,72 @@ export async function main(args: string[], dependencies: Dependencies = {}): Pro
   --timeout-ms INTEGER  Default 30000
   --auth-path PATH      Pi credential-file override
   --log-dir PATH        Default logs/auto-approve
+  --bindings PATH       Local evaluator ID -> { provider, model } overrides
+  --resolve-only        Resolve using local auth; no inference requests or logs
   --dry-run             Validate/reconstruct without auth, requests or logs
   --help`);
 		return 0;
 	}
 	const entries = loadMatrix(JSON.parse(await readFile(join(here, "matrix.json"), "utf8")));
+	const bindings = options.bindings ? loadBindings(JSON.parse(await readFile(resolve(options.bindings), "utf8")), entries) : {};
 	const runner = dependencies.runner ?? join(here, "run.ts");
 	const controller = new AbortController();
 	const interrupt = () => controller.abort();
 	process.on("SIGINT", interrupt);
 	process.on("SIGTERM", interrupt);
 	try {
-		const runnerArgs = (entry: Entry) => ["--provider", entry.provider, "--model", entry.model, "--effort", entry.effort, ...options.shared];
+		const runnerArgs = (entry: ResolvedEntry) => ["--provider", entry.provider, "--model", entry.model, "--type", entry.kind, "--effort", entry.effort, ...options.shared];
 		for (const entry of entries) {
-			const preview = await childRun(runner, [...runnerArgs(entry), "--dry-run", "--json"], controller.signal);
+			const candidate = Object.hasOwn(bindings, entry.id) ? bindings[entry.id] : entry.candidates[0];
+			const preview = await childRun(runner, [...runnerArgs({ ...entry, ...candidate }), "--dry-run", "--json"], controller.signal);
 			if (controller.signal.aborted) return 130;
 			if (preview.code !== 0) throw new Error("Matrix preflight failed; check dataset and options");
 			const planned: unknown = JSON.parse(preview.stdout).plannedRequests;
 			if (!Number.isSafeInteger(planned) || (planned as number) < 1) throw new Error("Invalid runner preview");
-			if (options.dryRun) console.log(`${entry.provider}/${entry.model} (${entry.effort}): ${planned} planned requests`);
+			if (options.dryRun) console.log(`${entry.id} (${entry.kind}, ${entry.effort}): ${planned} planned requests; provider unresolved`);
 		}
 		if (options.dryRun) return 0;
+		let runtime: ModelRuntime | undefined;
+		const available = dependencies.available ?? (async (entry: ResolvedEntry, signal: AbortSignal) => {
+			runtime ??= await ModelRuntime.create({ modelsPath: null, authPath: options.authPath,
+				refreshOnCreate: false, allowModelNetwork: false, signal });
+			const models = await runtime.getAvailableOfType(entry.kind, entry.provider, { signal });
+			return models.some((model) => model.id === entry.model && (entry.kind === "classifier" ||
+				!!runtime!.getPhysicalModel(entry.provider, entry.model)));
+		});
+		const resolved = new Map<string, ResolvedEntry>();
+		for (const entry of entries) {
+			const selected = await resolveEntry(entry, Object.hasOwn(bindings, entry.id) ? bindings[entry.id] : undefined,
+				(candidate) => available(candidate, controller.signal));
+			controller.signal.throwIfAborted();
+			if (selected) resolved.set(entry.id, selected);
+			if (options.resolveOnly) console.log(`${entry.id}: ${selected ? `${selected.provider}/${selected.model}` : "unavailable"} (${entry.kind}, ${entry.effort})`);
+		}
+		if (options.resolveOnly) return resolved.size === entries.length ? 0 : 1;
 		await mkdir(options.logDir, { recursive: true, mode: 0o700 });
 		const directory = await mkdtemp(join(options.logDir, `matrix-${new Date().toISOString().replaceAll(":", "-")}-`));
 		console.error(`Matrix logs: ${directory}`);
-		const rows: Row[] = entries.map((entry) => ({ ...entry, status: "pending" }));
+		const rows: Row[] = entries.map((entry) => ({ ...entry, ...resolved.get(entry.id), status: "pending" }));
 		const save = async () => {
-			await writeFile(join(directory, "manifest.json"), `${JSON.stringify({ schemaVersion: 1, interrupted: controller.signal.aborted, entries: rows }, null, 2)}\n`, { mode: 0o600 });
+			await writeFile(join(directory, "manifest.json"), `${JSON.stringify({ schemaVersion: 2, interrupted: controller.signal.aborted, entries: rows }, null, 2)}\n`, { mode: 0o600 });
 			await writeFile(join(directory, "summary.txt"), `${formatMatrix(rows)}\n`, { mode: 0o600 });
 		};
 		await save();
-		let runtime: ModelRuntime | undefined;
-		const available = dependencies.available ?? (async (entry: Entry, signal: AbortSignal) => {
-			runtime ??= await ModelRuntime.create({ modelsPath: null, authPath: options.authPath,
-				refreshOnCreate: false, allowModelNetwork: false, signal });
-			// The typesafe entry is a built-in classifier, not a physical chat model.
-			return entry.provider === "typesafe"
-				? !!runtime.getModelOfType("classifier", "typesafe", entry.model)
-				: !!runtime.getPhysicalModel(entry.provider, entry.model);
-		});
 		for (const [index, row] of rows.entries()) {
 			if (controller.signal.aborted) break;
-			const label = `${row.provider}/${row.model} (${row.effort})`;
+			const selected = resolved.get(row.id);
+			const label = `${row.id}: ${selected ? `${selected.provider}/${selected.model}` : "unavailable"} (${row.effort})`;
 			try {
-				const exists = await available(row, controller.signal);
-				controller.signal.throwIfAborted();
-				if (!exists) {
+				if (!selected) {
 					row.status = "unavailable";
-					console.error(`Unavailable built-in model: ${label}`);
+					console.error(`Unavailable evaluator: ${label}`);
 				} else if (!controller.signal.aborted) {
 					const entryDir = join(directory, String(index + 1));
 					await mkdir(entryDir, { mode: 0o700 });
 					row.stdout = join(entryDir, "stdout.txt");
 					row.stderr = join(entryDir, "stderr.txt");
 					console.error(`Running ${label}…`);
-					const result = await childRun(runner, [...runnerArgs(row), "--log-dir", entryDir, "--json"], controller.signal,
+					const result = await childRun(runner, [...runnerArgs(selected), "--log-dir", entryDir, "--json"], controller.signal,
 						{ stdout: row.stdout, stderr: row.stderr });
 					row.exitCode = result.code;
 					row.status = controller.signal.aborted ? "interrupted" : result.code === 0 ? "completed" : "failed";
@@ -209,6 +255,9 @@ export async function main(args: string[], dependencies: Dependencies = {}): Pro
 		await save();
 		console.log(formatMatrix(rows));
 		return controller.signal.aborted ? 130 : rows.some((row) => row.status !== "completed") ? 1 : 0;
+	} catch (error) {
+		if (controller.signal.aborted) return 130;
+		throw error;
 	} finally {
 		process.off("SIGINT", interrupt);
 		process.off("SIGTERM", interrupt);

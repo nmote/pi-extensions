@@ -15,7 +15,7 @@ const hash = (value: string | Buffer) => createHash("sha256").update(value).dige
 
 export function cliOptions(args: string[]) {
 	const { values } = parseArgs({ args, options: {
-		provider: { type: "string" }, model: { type: "string" }, effort: { type: "string", default: "low" },
+		provider: { type: "string" }, model: { type: "string" }, type: { type: "string" }, effort: { type: "string", default: "low" },
 		"timeout-ms": { type: "string", default: "30000" }, repetitions: { type: "string", default: "3" },
 		cases: { type: "string", default: join(root, "benchmark/auto-approve/cases.jsonl") },
 		output: { type: "string" }, "auth-path": { type: "string" },
@@ -28,6 +28,9 @@ export function cliOptions(args: string[]) {
 	if (values.effort !== "low" && values.effort !== "medium" && values.effort !== "high") {
 		throw new Error("--effort must be low, medium or high");
 	}
+	if (values.type !== undefined && values.type !== "chat" && values.type !== "classifier") {
+		throw new Error("--type must be chat or classifier");
+	}
 	const effort: "low" | "medium" | "high" = values.effort;
 	const positive = (value: string, name: string) => {
 		const number = Number(value);
@@ -37,7 +40,7 @@ export function cliOptions(args: string[]) {
 	const timeoutMs = positive(values["timeout-ms"]!, "--timeout-ms");
 	if (timeoutMs > 2_147_483_647) throw new Error("--timeout-ms exceeds Node's timer limit");
 	return {
-		help: false as const, provider: values.provider, model: values.model,
+		help: false as const, provider: values.provider, model: values.model, type: values.type,
 		effort, timeoutMs, repetitions: positive(values.repetitions!, "--repetitions"),
 		cases: resolve(values.cases!), output: values.output ? resolve(values.output) : undefined,
 		authPath: values["auth-path"], dryRun: values["dry-run"],
@@ -92,7 +95,8 @@ async function checkOutput(path: string): Promise<void> {
 }
 
 const help = `Usage: npm run --silent benchmark:auto-approve -- --provider PROVIDER --model MODEL [options]
-  --provider typesafe runs the built-in Jev classifier; --effort is inert there
+  --type chat|classifier    Default chat when present, otherwise classifier
+  --effort is inert for classifiers
   --effort low|medium|high   Default low
   --timeout-ms INTEGER      Default 30000
   --repetitions INTEGER     Default 3
@@ -123,7 +127,7 @@ export async function main(args: string[]): Promise<number> {
 	};
 	if (options.dryRun) {
 		const preview = { dryRun: true, datasetIdentity, evaluatorPolicyIdentity,
-			provider: options.provider, model: options.model, effort: options.effort,
+			provider: options.provider, model: options.model, type: options.type ?? null, effort: options.effort,
 			timeoutMs: options.timeoutMs, repetitions: options.repetitions, plannedRequests: planned };
 		const json = `${JSON.stringify(preview, null, 2)}\n`;
 		if (options.output) await writeFile(options.output, json, { flag: "wx", mode: 0o600 });
@@ -148,20 +152,23 @@ export async function main(args: string[]): Promise<number> {
 		let model: Parameters<typeof runEvaluations>[0]["model"];
 		let modelIdentity: ModelIdentity;
 		let evaluate: EvaluateFn | undefined;
-		if (options.provider === "typesafe") {
-			const classifier = runtime.getModelOfType("classifier", "typesafe", options.model);
+		const chat = options.type === "classifier" ? undefined : runtime.getPhysicalModel(options.provider, options.model);
+		if (options.type === "classifier" || (options.type !== "chat" && !chat)) {
+			const classifier = runtime.getModelOfType("classifier", options.provider, options.model);
 			if (!classifier) throw new Error("Unknown built-in classifier model");
 			model = classifier;
 			modelIdentity = {
 				...versions, api: classifier.api,
 				questionSchemaHash: hash(JSON.stringify(JEV_QUESTIONS)),
-				// The catalog prices jev-latest all-zero (unknown); record the published rate.
-				pricing: { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 },
+				// TypeSafe and Cloudflare Jev have unknown catalog pricing; use their published rate.
+				pricing: ((options.provider === "typesafe" && options.model === "jev-latest") ||
+					(options.provider === "cloudflare-workers-ai" && options.model === "typesafe/jev"))
+					? { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 }
+					: { ...classifier.cost },
 			};
 			evaluate = (_model, ctx, toolName, input, config, instructions, guidance) =>
 				evaluateSafetyJev(classifier, { ...ctx, modelRegistry: runtime }, toolName, input, config, instructions, guidance);
 		} else {
-			const chat = runtime.getPhysicalModel(options.provider, options.model);
 			if (!chat) throw new Error("Unknown built-in physical chat model");
 			model = chat;
 			const selected = {

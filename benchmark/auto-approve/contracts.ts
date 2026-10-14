@@ -291,7 +291,7 @@ export const chatModelIdentitySchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-/** Classifier identity: no catalog hash; pricing is recorded manually (the catalog prices it all-zero). */
+/** Classifier identity includes the question schema and selected provider's pricing. */
 export const classifierModelIdentitySchema = Type.Object(
 	{
 		...versionFields,
