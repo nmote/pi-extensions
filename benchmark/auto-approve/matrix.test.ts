@@ -33,7 +33,7 @@ try {
 	// Exercise the real runner's reconstruction, with nonexistent credentials and no log directory.
 	const dryLogs = join(directory, "dry-logs");
 	assert.equal(await main(["--dry-run", "--auth-path", join(directory, "absent-auth"), "--log-dir", dryLogs]), 0);
-	assert.equal(stdout.split("planned requests").length - 1, 4);
+	assert.equal(stdout.split("planned requests").length - 1, 5);
 	await assert.rejects(stat(dryLogs), { code: "ENOENT" });
 	const invalid = join(directory, "invalid.jsonl");
 	await writeFile(invalid, "{}\n");
@@ -44,7 +44,7 @@ try {
 		usage: null, estimatedCostUsd: null, responseModel: null, providerThinkingLevel: null, stopReason: "stop",
 		result: { kind: "verdict", verdict: "review", reason: "private fixture reason" } }));
 	const report: RunResult = {
-		schemaVersion: 1, datasetIdentity: { caseIds: [cases[0].id], count: 1, contentHash: "fixture" },
+		schemaVersion: 2, datasetIdentity: { caseIds: [cases[0].id], count: 1, contentHash: "fixture" },
 		evaluatorPolicyIdentity: { extensionVersion: "fixture", sourcesHash: "fixture", substitution: "fixture" },
 		provider: "fixture", model: "fixture", effort: "low", timeoutMs: 30, repetitions: 2, startedAt: 0, finishedAt: 1,
 		modelIdentity: { piCodingAgentVersion: "fixture", piAiVersion: "fixture", api: "fixture", reasoning: false,
@@ -101,10 +101,10 @@ if (args.includes('--dry-run')) {
 	stdout = stderr = "";
 	const checked: string[] = [];
 	assert.equal(await main(args, { runner, available: async (entry) => { checked.push(entry.provider); return entry.provider !== "openai"; } }), 1);
-	assert.deepEqual(checked, ["openai", "fireworks", "anthropic", "fireworks"]);
+	assert.deepEqual(checked, ["openai", "fireworks", "anthropic", "fireworks", "typesafe"]);
 	const first = join(logDir, (await readdir(logDir))[0]);
 	const manifest = JSON.parse(await readFile(join(first, "manifest.json"), "utf8"));
-	assert.deepEqual(manifest.entries.map((row: { status: string }) => row.status), ["unavailable", "failed", "completed", "completed"]);
+	assert.deepEqual(manifest.entries.map((row: { status: string }) => row.status), ["unavailable", "failed", "completed", "completed", "completed"]);
 	assert.equal(stdout, `${await readFile(join(first, "summary.txt"), "utf8")}`);
 	assert.match(stdout, /n\/a/);
 	assert.match(stdout, /1\/0\/0\s+n\/a/);
@@ -145,15 +145,19 @@ if (args.includes('--dry-run')) {
 		return { getPhysicalModel: (provider: string, model: string) => {
 			catalogChecks.push(`${provider}/${model}`);
 			return {};
+		}, getModelOfType: (type: string, provider: string, model: string) => {
+			catalogChecks.push(`${type}:${provider}/${model}`);
+			return {};
 		} } as unknown as ModelRuntime;
 	};
 	assert.equal(await main(args, { runner }), 1);
 	assert.equal(initialized, 1);
-	assert.equal(catalogChecks.length, 4);
+	assert.equal(catalogChecks.length, 5);
 	assert.equal(catalogChecks[3], "fireworks/accounts/fireworks/models/glm-5p3-flash");
+	assert.equal(catalogChecks[4], "classifier:typesafe/jev-latest");
 	const second = (await readdir(logDir)).find((name) => join(logDir, name) !== first)!;
 	const retained = JSON.parse(await readFile(join(logDir, second, "manifest.json"), "utf8"));
-	assert.deepEqual(retained.entries.map((row: { status: string }) => row.status), ["failed", "failed", "completed", "completed"]);
+	assert.deepEqual(retained.entries.map((row: { status: string }) => row.status), ["failed", "failed", "completed", "completed", "completed"]);
 	assert.ok(retained.entries[0].aggregates);
 	assert.ok(retained.entries[1].aggregates, "JSON scores survive missing text report");
 	assert.match(stderr, /scores exclude 2 failed attempts/);
@@ -194,7 +198,7 @@ if (args.includes('--dry-run')) {
 	const interruptedDir = join(interruptedLogs, (await readdir(interruptedLogs))[0]);
 	const interrupted = JSON.parse(await readFile(join(interruptedDir, "manifest.json"), "utf8"));
 	assert.equal(interrupted.interrupted, true);
-	assert.deepEqual(interrupted.entries.map((row: { status: string }) => row.status), ["completed", "interrupted", "interrupted", "interrupted"]);
+	assert.deepEqual(interrupted.entries.map((row: { status: string }) => row.status), ["completed", "interrupted", "interrupted", "interrupted", "interrupted"]);
 	assert.ok(isRunResult(JSON.parse(await readFile(interrupted.entries[0].results, "utf8"))));
 	assert.equal(interrupted.entries[2].stdout, undefined);
 } finally {

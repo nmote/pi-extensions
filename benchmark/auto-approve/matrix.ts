@@ -152,7 +152,10 @@ export async function main(args: string[], dependencies: Dependencies = {}): Pro
 		const available = dependencies.available ?? (async (entry: Entry, signal: AbortSignal) => {
 			runtime ??= await ModelRuntime.create({ modelsPath: null, authPath: options.authPath,
 				refreshOnCreate: false, allowModelNetwork: false, signal });
-			return !!runtime.getPhysicalModel(entry.provider, entry.model);
+			// The typesafe entry is a built-in classifier, not a physical chat model.
+			return entry.provider === "typesafe"
+				? !!runtime.getModelOfType("classifier", "typesafe", entry.model)
+				: !!runtime.getPhysicalModel(entry.provider, entry.model);
 		});
 		for (const [index, row] of rows.entries()) {
 			if (controller.signal.aborted) break;

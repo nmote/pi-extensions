@@ -16,7 +16,8 @@ import { loadBuiltinRoots } from "../../exts/auto-approve/builtin-roots.ts";
 import { resolveRoot } from "../../exts/auto-approve/rules.ts";
 
 export const CASE_SCHEMA_VERSION = 1;
-export const RUN_RESULT_SCHEMA_VERSION = 1;
+// 2: modelIdentity is a chat/classifier union.
+export const RUN_RESULT_SCHEMA_VERSION = 2;
 
 /** Identifies the fictional installation mapping and bundled-root replay baseline. */
 export const SUBSTITUTION_ID = "fictional-install-v2";
@@ -259,30 +260,49 @@ export const tokenUsageSchema = Type.Object(
 );
 export type TokenUsage = Static<typeof tokenUsageSchema>;
 
-export const modelIdentitySchema = Type.Object(
+/** Catalog rates in USD per million tokens; all-zero rates mean unknown pricing. */
+const pricingSchema = Type.Object(
 	{
-		piCodingAgentVersion: Type.String({ minLength: 1 }),
-		piAiVersion: Type.String({ minLength: 1 }),
-		api: Type.String({ minLength: 1 }),
+		input: count, output: count, cacheRead: count, cacheWrite: count,
+		tiers: Type.Optional(Type.Array(Type.Object(
+			{ inputTokensAbove: count, input: count, output: count, cacheRead: count, cacheWrite: count },
+			{ additionalProperties: false },
+		))),
+	},
+	{ additionalProperties: false },
+);
+
+const versionFields = {
+	piCodingAgentVersion: Type.String({ minLength: 1 }),
+	piAiVersion: Type.String({ minLength: 1 }),
+	api: Type.String({ minLength: 1 }),
+};
+
+export const chatModelIdentitySchema = Type.Object(
+	{
+		...versionFields,
 		reasoning: Type.Boolean(),
 		input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])),
 		contextWindow: count,
 		maxTokens: count,
-		/** Catalog rates in USD per million tokens; all-zero rates mean unknown pricing. */
-		pricing: Type.Object(
-			{
-				input: count, output: count, cacheRead: count, cacheWrite: count,
-				tiers: Type.Optional(Type.Array(Type.Object(
-					{ inputTokensAbove: count, input: count, output: count, cacheRead: count, cacheWrite: count },
-					{ additionalProperties: false },
-				))),
-			},
-			{ additionalProperties: false },
-		),
+		pricing: pricingSchema,
 		catalogHash: Type.String({ minLength: 1 }),
 	},
 	{ additionalProperties: false },
 );
+
+/** Classifier identity: no catalog hash; pricing is recorded manually (the catalog prices it all-zero). */
+export const classifierModelIdentitySchema = Type.Object(
+	{
+		...versionFields,
+		/** Hash of the static question schema sent to the classifier. */
+		questionSchemaHash: Type.String({ minLength: 1 }),
+		pricing: pricingSchema,
+	},
+	{ additionalProperties: false },
+);
+
+export const modelIdentitySchema = Type.Union([chatModelIdentitySchema, classifierModelIdentitySchema]);
 export type ModelIdentity = Static<typeof modelIdentitySchema>;
 
 /**

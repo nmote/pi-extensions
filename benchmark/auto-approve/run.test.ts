@@ -27,6 +27,15 @@ ModelRuntime.create = async (options) => {
 	assert.equal(options?.refreshOnCreate, false);
 	assert.equal(options?.allowModelNetwork, false);
 	return { getPhysicalModel: () => model,
+		getModelOfType: (type: string, provider: string, id: string) =>
+			type === "classifier" && provider === "typesafe" ? { id, provider, api: "typesafe-system-one" } : undefined,
+		classify: async () => {
+			requests++;
+			return { stopReason: "stop", model: "jev-latest",
+				answers: { verdict: { type: "choice", choice: "allow", probabilities: { allow: 0.97 }, confidence: 0.91 } },
+				usage: { input: 50, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 50,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+		},
 		streamSimple: () => ({ result: async () => {
 			requests++;
 			return { stopReason: "stop", content: [{ type: "text", text: '{"decision":"allow","reason":"offline fixture"}' }],
@@ -91,6 +100,21 @@ try {
 	assert.equal(await main([...args, "--json", "--repetitions", "1"]), 0);
 	assert.ok(isRunResult(JSON.parse(stdout)));
 	assert.equal((await readdir(logDir)).length, 2);
+
+	// Classifier path: the typesafe provider resolves a built-in classifier and evaluates via classify().
+	stdout = "";
+	const jevArgs = ["--provider", "typesafe", "--model", "jev-latest", "--log-dir", logDir, "--repetitions", "1", "--json"];
+	assert.equal(await main(jevArgs), 0);
+	const jevReport = JSON.parse(stdout);
+	assert.ok(isRunResult(jevReport));
+	const jevIdentity = jevReport.modelIdentity as Record<string, unknown>;
+	assert.equal(typeof jevIdentity.questionSchemaHash, "string");
+	assert.equal(jevReport.modelIdentity.pricing.input, 0.042);
+	const jevOutcome = jevReport.outcomes[0];
+	assert.ok(jevOutcome.result.kind === "verdict");
+	assert.equal(jevOutcome.result.verdict, "allow");
+	assert.equal(jevOutcome.result.reason, "allow (p=0.97, confidence=0.91)");
+	assert.equal(jevOutcome.estimatedCostUsd, 50 * 0.042 / 1e6);
 } finally {
 	ModelRuntime.create = originalCreate;
 	process.stdout.write = originalWrite;

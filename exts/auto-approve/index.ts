@@ -46,7 +46,10 @@ import { Type } from "typebox";
 import { EVALUATOR_CACHE_ENTRY, EvaluatorCache } from "./cache.ts";
 import { ApprovalQueue } from "./approval-queue.ts";
 import { loadBuiltinRoots, supplementalRoots } from "./builtin-roots.ts";
-import { type AutoApproveConfig, EFFORTS, isEffort, isMode, loadConfig, type Mode, MODES, saveEvaluatorEffort } from "./config.ts";
+import {
+	type AutoApproveConfig, BACKENDS, EFFORTS, type EvaluatorBackend, isBackend, isEffort, isMode, loadConfig,
+	type Mode, MODES, saveEvaluatorBackend, saveEvaluatorEffort,
+} from "./config.ts";
 import {
 	absoluteToolPath,
 	buildMatchInput,
@@ -62,6 +65,7 @@ import {
 	symlinkNote,
 } from "./rules.ts";
 import { type EvaluationResult, evaluateSafety } from "./evaluator.ts";
+import { evaluateSafetyJev } from "./jev-evaluator.ts";
 import { EVAL_LOG_SCHEMA_VERSION, type EvalLogRecord } from "./eval-log.ts";
 import { EvalLogWriter } from "./eval-writer.ts";
 import { realPathOf } from "./realpath.ts";
@@ -308,6 +312,54 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		config.evaluator.reasoningEffort = effort;
 		evaluatorCache.clear();
 		ctx.ui.notify(`Auto-approve evaluator effort: ${effort}`, "info");
+	}
+
+	function evaluatorLabel(): string {
+		return config.evaluator.backend === "jev"
+			? `jev (typesafe/${config.evaluator.jev.model})`
+			: "chat model (managed by /small-model)";
+	}
+
+	function setBackend(backend: EvaluatorBackend, ctx: ExtensionContext): void {
+		try {
+			saveEvaluatorBackend(backend);
+		} catch (error) {
+			ctx.ui.notify(`Auto-approve: could not save evaluator backend: ${error}`, "error");
+			return;
+		}
+		config.evaluator.backend = backend;
+		evaluatorCache.clear();
+		ctx.ui.notify(`Auto-approve evaluator: ${evaluatorLabel()}`, "info");
+	}
+
+	/** Evaluate with the configured backend; undefined means no evaluator was available. */
+	async function evaluateWithBackend(
+		ctx: ExtensionContext,
+		toolName: string,
+		rawInput: Record<string, unknown>,
+		instructions: readonly string[],
+		policy: ApprovalGuidance,
+	): Promise<{ model: { provider: string; id: string }; result: EvaluationResult } | undefined> {
+		if (config.evaluator.backend === "jev") {
+			const classifier = ctx.modelRegistry.findOfType("classifier", "typesafe", config.evaluator.jev.model);
+			if (!classifier || !ctx.modelRegistry.getProviderAuthStatus("typesafe").configured) {
+				ctx.ui.notify(
+					"Auto-approve: Jev evaluator unavailable; run /login typesafe or pick another backend with /auto evaluator",
+					"warning",
+				);
+				return undefined;
+			}
+			return {
+				model: { provider: classifier.provider, id: classifier.id },
+				result: await evaluateSafetyJev(classifier, ctx, toolName, rawInput, config.evaluator, instructions, policy),
+			};
+		}
+		const model = await ensureSmallModel(ctx);
+		if (!model) return undefined;
+		return {
+			model: { provider: model.provider, id: model.id },
+			result: await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, instructions, policy),
+		};
 	}
 
 	function preview(toolName: string, input: MatchInput, cwd: string): string {
@@ -649,15 +701,14 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				const cached = !!result;
 				let evaluated: { model: { provider: string; id: string }; result: EvaluationResult } | undefined;
 				if (!result) {
-					const model = await ensureSmallModel(ctx);
-					if (!model) return softReject(ctx, toolName, rawInput, input, "no evaluator model available", true);
 					ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 					try {
-						result = await evaluateSafety(model, ctx, toolName, rawInput, config.evaluator, context.instructions, policy);
+						evaluated = await evaluateWithBackend(ctx, toolName, rawInput, context.instructions, policy);
 					} finally {
 						ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
 					}
-					evaluated = { model, result };
+					if (!evaluated) return softReject(ctx, toolName, rawInput, input, "no evaluator model available", true);
+					result = evaluated.result;
 				}
 				// The final authoritative read is the authorization boundary, even if its RPC response is buffered.
 				const current = await exchangeGuidance({ action: "get" }, ctx);
@@ -704,7 +755,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("auto", {
-		description: "Auto-approval: /auto [manual|auto|yolo|guidance [clear]|effort [low|medium|high]|stats|test <cmd>]",
+		description: "Auto-approval: /auto [manual|auto|yolo|guidance [clear]|effort [low|medium|high]|evaluator [chat|jev]|stats|test <cmd>]",
 		handler: async (args, ctx) => {
 			const trimmed = (args ?? "").trim();
 
@@ -715,7 +766,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 						? `${small.provider}/${small.model}`
 						: "(not set — pick one with /small-model)";
 				ctx.ui.notify(
-					`Auto-approve\n  mode: ${modeLabel(mode)}\n  small model: ${evalModel}\n  evaluator effort: ${config.evaluator.reasoningEffort}\n  allow: ${config.allow.length} rule(s), deny: ${config.deny.length} rule(s), context: ${config.context.length} rule(s)\n  writeRoots: ${["<cwd>", ...config.writeRoots].join(", ")}\n  readRoots: ${["<cwd>", "<writeRoots>", skillsDir, ...installDocRoots, ...config.readRoots].join(", ")}`,
+					`Auto-approve\n  mode: ${modeLabel(mode)}\n  evaluator: ${config.evaluator.backend === "jev" ? evaluatorLabel() : `chat (${evalModel})`}\n  evaluator effort: ${config.evaluator.reasoningEffort}\n  allow: ${config.allow.length} rule(s), deny: ${config.deny.length} rule(s), context: ${config.context.length} rule(s)\n  writeRoots: ${["<cwd>", ...config.writeRoots].join(", ")}\n  readRoots: ${["<cwd>", "<writeRoots>", skillsDir, ...installDocRoots, ...config.readRoots].join(", ")}`,
 					"info",
 				);
 				return;
@@ -764,6 +815,25 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				return;
 			}
 
+			if (trimmed === "evaluator" || trimmed.startsWith("evaluator ")) {
+				const requested = trimmed.slice("evaluator".length).trim();
+				if (requested && !isBackend(requested)) {
+					ctx.ui.notify("Usage: /auto evaluator [chat|jev]", "warning");
+					return;
+				}
+				if (!requested && !ctx.hasUI) {
+					ctx.ui.notify("Usage: /auto evaluator [chat|jev]", "warning");
+					return;
+				}
+				const choice = requested || await ctx.ui.select(
+					`Evaluator backend (current: ${config.evaluator.backend}):`,
+					["Chat model (managed by /small-model)", `Jev (typesafe/${config.evaluator.jev.model})`],
+				);
+				const backend = requested || (choice?.startsWith("Jev") ? "jev" : choice ? "chat" : undefined);
+				if (isBackend(backend)) setBackend(backend, ctx);
+				return;
+			}
+
 			if (trimmed === "stats") {
 				ctx.ui.notify(
 					`Auto-approve stats\n  evaluator allows: ${stats.evaluatorAllows}\n  soft rejections: ${stats.softRejections}\n  evaluator failures: ${stats.evaluatorFailures}\n  escalations: ${stats.escalations}\n  human approvals: ${stats.humanApprovals}\n  human denials: ${stats.humanDenials}`,
@@ -783,11 +853,6 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					ctx.ui.notify(call, "warning");
 					return;
 				}
-				const model = await ensureSmallModel(ctx);
-				if (!model) {
-					ctx.ui.notify("auto-approve: no evaluator model available", "warning");
-					return;
-				}
 				let policy: ApprovalGuidance;
 				try {
 					policy = await exchangeGuidance({ action: "get" }, ctx);
@@ -797,17 +862,21 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				}
 				const instructions = evaluatorContext(buildMatchInput(call.toolName, call.input), ctx.cwd).instructions;
 				ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
-				let result: Awaited<ReturnType<typeof evaluateSafety>>;
+				let evaluated: Awaited<ReturnType<typeof evaluateWithBackend>>;
 				try {
-					result = await evaluateSafety(model, ctx, call.toolName, call.input, config.evaluator, instructions, policy);
+					evaluated = await evaluateWithBackend(ctx, call.toolName, call.input, instructions, policy);
 				} finally {
 					ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
 				}
-				ctx.ui.notify(`Evaluator verdict (${call.toolName}): ${result.decision.toUpperCase()}\n${result.reason}`, "info");
+				if (!evaluated) {
+					ctx.ui.notify("auto-approve: no evaluator model available", "warning");
+					return;
+				}
+				ctx.ui.notify(`Evaluator verdict (${call.toolName}): ${evaluated.result.decision.toUpperCase()}\n${evaluated.result.reason}`, "info");
 				return;
 			}
 
-			ctx.ui.notify(`Unknown: /auto ${trimmed}\nUse: manual | auto | yolo | guidance [clear] | effort [low|medium|high] | stats | test <cmd> | test <tool> <json>`, "warning");
+			ctx.ui.notify(`Unknown: /auto ${trimmed}\nUse: manual | auto | yolo | guidance [clear] | effort [low|medium|high] | evaluator [chat|jev] | stats | test <cmd> | test <tool> <json>`, "warning");
 		},
 	});
 

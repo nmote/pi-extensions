@@ -1,5 +1,7 @@
 import { performance } from "node:perf_hooks";
-import type { Model } from "@earendil-works/pi-ai";
+import type { ClassifierApi, ClassifierModel, Model } from "@earendil-works/pi-ai";
+import type { ApprovalGuidance } from "../../exts/shared/approval-guidance.ts";
+import type { EvaluatorConfig } from "../../exts/auto-approve/config.ts";
 import { evaluateSafety, type EvaluationResult, type EvaluatorContext } from "../../exts/auto-approve/evaluator.ts";
 import { buildMatchInput, evaluatorInstructions } from "../../exts/auto-approve/rules.ts";
 import { INSTALL_READ_ROOTS, sparseRealPath, type Case, type ModelIdentity, type Outcome, type TokenUsage } from "./contracts.ts";
@@ -30,23 +32,34 @@ export function tokenUsage(result: EvaluationResult): TokenUsage | null {
 	return Object.values(tokens).some((value) => value !== null && value > 0) ? tokens : null;
 }
 
+/** Injectable evaluator; run.ts supplies a Jev closure for classifier runs. */
+export type EvaluateFn = (
+	model: Model<any> | ClassifierModel<ClassifierApi>,
+	ctx: EvaluatorContext,
+	toolName: string,
+	input: Record<string, unknown>,
+	config: EvaluatorConfig,
+	instructions?: readonly string[],
+	guidance?: ApprovalGuidance,
+) => Promise<EvaluationResult>;
+
 export interface RunOptions {
 	cases: Case[];
-	model: Model<any>;
+	model: Model<any> | ClassifierModel<ClassifierApi>;
 	modelRegistry: EvaluatorContext["modelRegistry"];
 	effort: "low" | "medium" | "high";
 	timeoutMs: number;
 	repetitions: number;
 	pricing: ModelIdentity["pricing"];
 	signal?: AbortSignal;
-	evaluate?: typeof evaluateSafety;
+	evaluate?: EvaluateFn;
 	onProgress?: (caseId: string, repetition: number) => void;
 }
 
 /** Serial repetition-major scheduling, with no retries or verdict memoization. */
 export async function runEvaluations(options: RunOptions): Promise<Outcome[]> {
 	const outcomes: Outcome[] = [];
-	const evaluate = options.evaluate ?? evaluateSafety;
+	const evaluate: EvaluateFn = options.evaluate ?? (evaluateSafety as EvaluateFn);
 	const instructions = options.cases.map(instructionsFor);
 	for (let repetition = 1; repetition <= options.repetitions; repetition++) {
 		for (const [index, value] of options.cases.entries()) {
@@ -57,6 +70,7 @@ export async function runEvaluations(options: RunOptions): Promise<Outcome[]> {
 				cwd: value.cwd, signal: options.signal, modelRegistry: options.modelRegistry,
 			}, value.tool, value.input, {
 				reasoningEffort: options.effort, timeoutMs: options.timeoutMs, memoize: false,
+				backend: "chat", jev: { model: "jev-latest" },
 			}, instructions[index], value.sessionGuidance);
 			options.signal?.throwIfAborted();
 			const usage = tokenUsage(result);

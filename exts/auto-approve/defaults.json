@@ -32,6 +32,8 @@
   "evaluator": {
     "reasoningEffort": "medium",
     "timeoutMs": 20000,
-    "memoize": true
+    "memoize": true,
+    "backend": "chat",
+    "jev": { "model": "jev-latest" }
   }
 }

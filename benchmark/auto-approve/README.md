@@ -27,7 +27,18 @@ npm run --silent benchmark:auto-approve -- --provider anthropic --model claude-h
 
 # Billable: run only when ready to contact the selected provider.
 npm run --silent benchmark:auto-approve -- --provider anthropic --model claude-haiku-4-5
+
+# The TypeSafe System One classifier (Jev) is a separate backend; --effort is inert.
+npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-latest --dry-run
+npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-latest
 ```
+
+`--provider typesafe` resolves a built-in classifier model and evaluates each
+case with one structured `classify()` call; an `allow` verdict requires
+confidence ≥ 0.5. Jev returns no prose, so outcome reasons are synthesized
+from the choice probabilities. Its catalog pricing is all-zero (unknown), so
+the report records the published rate manually ($0.042 per million input
+tokens; output is free).
 
 Use `--help` for options. Defaults: low effort, 30-second timeout, three
 repetitions. Two repetitions are supported. Cases default to this directory's
@@ -68,14 +79,16 @@ npm run --silent benchmark:auto-approve:matrix
 `matrix.json` pins OpenAI `gpt-6-luna`, Fireworks
 `accounts/fireworks/models/deepseek-v4p1-flash`, and Anthropic
 `claude-haiku-5-5`, plus Fireworks `accounts/fireworks/models/glm-5p3-flash`,
-all at medium effort. Models are never substituted.
+all at medium effort, and TypeSafe `jev-latest` at low effort (effort is inert
+for the classifier). Models are never substituted.
 The command accepts shared `--cases`, `--repetitions`, `--timeout-ms`,
 `--auth-path`, and `--log-dir` options with the single-run defaults.
 Dry-run validates the matrix and reconstructs inputs through the single-run
 command; it does not check model availability.
 
-Actual runs check the built-in physical chat-model catalog, without custom
-models or network refresh. Unavailable models and failed runs do not prevent
+Actual runs check the built-in physical chat-model catalog (the built-in
+classifier catalog for the typesafe entry), without custom models or network
+refresh. Unavailable models and failed runs do not prevent
 later entries from running. Stdout shows only evaluator labels, review-positive
 precision, recall, F2, unanimous/mixed/insufficient consistency counts,
 average estimated cost per evaluation in USD, the full estimated run cost in
@@ -100,10 +113,14 @@ and exits 130. An interrupted evaluator may have no report.
 
 ### Authentication
 
-Uses Pi's built-in physical chat models and normal auth, without sessions,
+Uses Pi's built-in physical chat models (or the built-in `typesafe`
+classifier) and normal auth, without sessions,
 settings, extensions, live approval configuration/guidance, `models.json`,
 or network catalog refresh. Use `--auth-path` to override the credential
-file; otherwise Pi's normal agent directory applies. Stored credentials take
+file; otherwise Pi's normal agent directory applies. For `typesafe`, set
+`TYPESAFE_API_KEY` or store a credential with `/login typesafe`. Because
+`models.json` is not read, a Cloudflare AI Gateway provider override does not
+apply to the benchmark; runs always use the built-in TypeSafe endpoint. Stored credentials take
 precedence over provider environment/ambient credentials. No API-key flag is
 provided; use provider environment variables for keys without shell-history
 exposure. Credential-file overrides do not disable ambient credentials.
@@ -206,7 +223,8 @@ escalation UX, soft-reject guidance shown to the main agent.
 
 Per `runResultSchema`: the runner replays each case × repetition through the
 current pure prompt functions (`evaluatorInstructions`,
-`buildSystemPrompt`, `buildDataMessage`) and records per-outcome results.
+`buildSystemPrompt`, `buildDataMessage`; the static Jev question schema and
+state construction for classifier runs) and records per-outcome results.
 Failure kinds (`timeout`, `parse`, `non-stop`, `error`) are not model review
 judgments and are excluded from verdict-metric denominators. Metrics are
 review-positive (`tp` = expected review, verdict review). Zero denominators
@@ -221,7 +239,8 @@ under `exts/auto-approve/` (including tests), its `defaults.json`, and
 identifies replay with both fictional installation and bundled preset roots.
 Model identity records installed Pi versions, selected capabilities, catalog
 pricing, and a hash of selected
-metadata including thinking/sampling defaults. Requested effort is not proof
+metadata including thinking/sampling defaults. Classifier runs instead record
+the API, a hash of the static question schema, and manually recorded pricing. Requested effort is not proof
 of effective effort; reported provider effort/response model remain null when
 unavailable.
 

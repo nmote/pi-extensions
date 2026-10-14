@@ -4,10 +4,11 @@ Controls tool permissions using explicit rules, human approval, or a background-
 
 ## Slash commands
 
-- `/auto` — Show the mode, evaluator model, effort, and policy settings.
+- `/auto` — Show the mode, evaluator backend, effort, and policy settings.
   - `/auto manual|auto|yolo` — Choose prompting, model evaluation, or automatic permission for unmatched calls; deny rules always apply.
   - `/auto guidance [clear]` — View/edit session evaluator guidance, or clear it.
-  - `/auto effort [low|medium|high]` — Pick or set evaluator reasoning effort (`evaluator.reasoningEffort` in configuration).
+  - `/auto effort [low|medium|high]` — Pick or set evaluator reasoning effort (`evaluator.reasoningEffort` in configuration; inert for the Jev backend).
+  - `/auto evaluator [chat|jev]` — Pick or set the evaluator backend (`evaluator.backend` in configuration).
   - `/auto stats` — Show evaluation and human-approval counters.
   - `/auto test <bash command>` or `/auto test <tool> <json object>` — Ask the evaluator for a verdict without executing the call.
 
@@ -25,7 +26,17 @@ Imports concatenate permission lists; empty local lists do not clear imported en
 
 Session-local tools and file access within cwd or configured roots are permitted by the base policy, excluding Git/Hg metadata; global skill reads and the running Pi installation's bundled documentation and examples (README, docs, examples, CHANGELOG) are also permitted, read-only. Unmatched calls prompt in `manual`, use the selected small model in `auto`, and proceed in `yolo`.
 
-Choose an authenticated evaluator with [`/small-model`](../small-model/README.md); there is no default, and calls may incur costs. Evaluations cache verdicts and default to a 20-second timeout and `medium` reasoning effort. Failures never grant access; required prompts without a usable UI block execution.
+Two evaluator backends are available. The default `chat` backend uses the shared small model: choose an authenticated one with [`/small-model`](../small-model/README.md); there is no default, and calls may incur costs. The `jev` backend uses Pi's built-in TypeSafe System One classifier (`typesafe/jev-latest`; override with `evaluator.jev.model`), which returns a structured allow/review choice instead of prose; an allow requires confidence ≥ 0.5 (not configurable). Evaluations cache verdicts and default to a 20-second timeout and `medium` reasoning effort. Failures never grant access; required prompts without a usable UI block execution.
+
+### Jev authentication
+
+Direct: set `TYPESAFE_API_KEY` or run `/login typesafe`; Pi's normal credential precedence applies.
+
+Cloudflare AI Gateway (one-time manual setup): create a Custom Provider with slug `typesafe` and base URL `https://api.typesafe.ai` (optionally with BYOK), then point the built-in provider at the gateway with a `~/.pi/agent/models.json` override, which preserves the built-in model:
+
+```json
+{"providers": {"typesafe": {"baseUrl": "https://gateway.ai.cloudflare.com/v1/ACCOUNT/GATEWAY/custom-typesafe/v1/", "headers": {"cf-aig-authorization": "Bearer $CF_AIG_TOKEN"}}}}
+```
 
 Approval dialogs offer **Approve once + edit session guidance…**. Like `/auto guidance`, this supplies session-scoped evaluator instructions. Name operations and targets explicitly: the evaluator cannot see your conversation. Guidance persists across resume/reload and applies to subagents; a footer indicator marks it active. It overrides conflicting evaluator defaults/context within its scope, but cannot override deny rules, explicit denials, or injection safeguards. It affects evaluated calls only, not allowlisted calls or manual/yolo behavior. Editing or clearing it invalidates cached and pending verdicts, but does not revoke calls already authorized by the final main-session policy check or separate exact-call approvals.
 

@@ -5,9 +5,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { evaluateSafetyJev, JEV_QUESTIONS } from "../../exts/auto-approve/jev-evaluator.ts";
 import { isRunResult, loadCases, RUN_RESULT_SCHEMA_VERSION, SUBSTITUTION_ID, type ModelIdentity, type RunResult } from "./contracts.ts";
 import { calculateAggregates, formatSummary, formatFullReport, summarizeLatency, summarizeUsage } from "./metrics.ts";
-import { instructionsFor, runEvaluations } from "./runner.ts";
+import { instructionsFor, runEvaluations, type EvaluateFn } from "./runner.ts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -91,6 +92,7 @@ async function checkOutput(path: string): Promise<void> {
 }
 
 const help = `Usage: npm run --silent benchmark:auto-approve -- --provider PROVIDER --model MODEL [options]
+  --provider typesafe runs the built-in Jev classifier; --effort is inert there
   --effort low|medium|high   Default low
   --timeout-ms INTEGER      Default 30000
   --repetitions INTEGER     Default 3
@@ -99,7 +101,7 @@ const help = `Usage: npm run --silent benchmark:auto-approve -- --provider PROVI
   --json                    JSON stdout instead of summary table
   --output PATH             Additional new JSON file
   --auth-path PATH          Pi credential-file override
-  --dry-run                 Validate/reconstruct without auth or requests
+  --dry-run                 Validate/reconstruct without auth, requests, or availability checks
   --help`;
 
 export async function main(args: string[]): Promise<number> {
@@ -139,25 +141,46 @@ export async function main(args: string[]): Promise<number> {
 		const runtime = await ModelRuntime.create({ modelsPath: null, authPath: options.authPath,
 			refreshOnCreate: false, allowModelNetwork: false, signal: controller.signal });
 		controller.signal.throwIfAborted();
-		const model = runtime.getPhysicalModel(options.provider, options.model);
-		if (!model) throw new Error("Unknown built-in physical chat model");
-		const selected = {
-			api: model.api, reasoning: model.reasoning, input: model.input,
-			contextWindow: model.contextWindow, maxTokens: model.maxTokens,
-			pricing: { input: model.cost.input, output: model.cost.output,
-				cacheRead: model.cost.cacheRead, cacheWrite: model.cost.cacheWrite,
-				...(model.cost.tiers ? { tiers: model.cost.tiers } : {}) },
-		};
-		const modelIdentity: ModelIdentity = { ...selected, catalogHash: hash(JSON.stringify({ ...selected,
-			thinkingLevelMap: model.thinkingLevelMap, samplingParams: model.samplingParams,
-			samplingParamsByThinkingLevel: model.samplingParamsByThinkingLevel })),
+		const versions = {
 			piCodingAgentVersion: await packageVersion("@earendil-works/pi-coding-agent"),
-			piAiVersion: await packageVersion("@earendil-works/pi-ai") };
+			piAiVersion: await packageVersion("@earendil-works/pi-ai"),
+		};
+		let model: Parameters<typeof runEvaluations>[0]["model"];
+		let modelIdentity: ModelIdentity;
+		let evaluate: EvaluateFn | undefined;
+		if (options.provider === "typesafe") {
+			const classifier = runtime.getModelOfType("classifier", "typesafe", options.model);
+			if (!classifier) throw new Error("Unknown built-in classifier model");
+			model = classifier;
+			modelIdentity = {
+				...versions, api: classifier.api,
+				questionSchemaHash: hash(JSON.stringify(JEV_QUESTIONS)),
+				// The catalog prices jev-latest all-zero (unknown); record the published rate.
+				pricing: { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 },
+			};
+			evaluate = (_model, ctx, toolName, input, config, instructions, guidance) =>
+				evaluateSafetyJev(classifier, { ...ctx, modelRegistry: runtime }, toolName, input, config, instructions, guidance);
+		} else {
+			const chat = runtime.getPhysicalModel(options.provider, options.model);
+			if (!chat) throw new Error("Unknown built-in physical chat model");
+			model = chat;
+			const selected = {
+				api: chat.api, reasoning: chat.reasoning, input: chat.input,
+				contextWindow: chat.contextWindow, maxTokens: chat.maxTokens,
+				pricing: { input: chat.cost.input, output: chat.cost.output,
+					cacheRead: chat.cost.cacheRead, cacheWrite: chat.cost.cacheWrite,
+					...(chat.cost.tiers ? { tiers: chat.cost.tiers } : {}) },
+			};
+			modelIdentity = { ...selected, catalogHash: hash(JSON.stringify({ ...selected,
+				thinkingLevelMap: chat.thinkingLevelMap, samplingParams: chat.samplingParams,
+				samplingParamsByThinkingLevel: chat.samplingParamsByThinkingLevel })),
+				...versions };
+		}
 		const startedAt = Date.now();
 		console.error(`Running ${planned} evaluations (${cases.length} cases × ${options.repetitions} repetitions)…`);
 		const outcomes = await runEvaluations({ cases, model, modelRegistry: runtime,
 			effort: options.effort, timeoutMs: options.timeoutMs, repetitions: options.repetitions,
-			pricing: modelIdentity.pricing, signal: controller.signal,
+			pricing: modelIdentity.pricing, signal: controller.signal, evaluate,
 		});
 		const report: RunResult = { schemaVersion: RUN_RESULT_SCHEMA_VERSION, datasetIdentity, evaluatorPolicyIdentity,
 			provider: options.provider, model: options.model, modelIdentity,

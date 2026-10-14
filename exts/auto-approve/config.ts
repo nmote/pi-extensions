@@ -18,9 +18,11 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { canonicalImportFile, expandImportPath, ImportResolutionError } from "../shared/import-path.ts";
 
 export type Mode = "manual" | "auto" | "yolo";
+export type EvaluatorBackend = "chat" | "jev";
 
 export const MODES: Mode[] = ["manual", "auto", "yolo"];
 export const EFFORTS: EvaluatorConfig["reasoningEffort"][] = ["low", "medium", "high"];
+export const BACKENDS: EvaluatorBackend[] = ["chat", "jev"];
 
 export function isMode(value: unknown): value is Mode {
 	return typeof value === "string" && (MODES as string[]).includes(value);
@@ -28,6 +30,10 @@ export function isMode(value: unknown): value is Mode {
 
 export function isEffort(value: unknown): value is EvaluatorConfig["reasoningEffort"] {
 	return typeof value === "string" && (EFFORTS as string[]).includes(value);
+}
+
+export function isBackend(value: unknown): value is EvaluatorBackend {
+	return typeof value === "string" && (BACKENDS as string[]).includes(value);
 }
 
 /**
@@ -61,12 +67,16 @@ export type ContextRule = Pick<Matcher, "tool" | "pattern" | "description"> & {
  * (see shared/small-model.ts, managed via /small-model).
  */
 export interface EvaluatorConfig {
-	/** Reasoning effort for the evaluator call. */
+	/** Reasoning effort for the evaluator call. Inert for the Jev backend. */
 	reasoningEffort: "low" | "medium" | "high";
 	/** Per-evaluation timeout in milliseconds. */
 	timeoutMs: number;
 	/** Cache evaluator outputs for exact commands in the current session. */
 	memoize: boolean;
+	/** Evaluator backend: the shared small chat model, or the Jev classifier. */
+	backend: EvaluatorBackend;
+	/** Jev backend settings. Endpoint/gateway overrides live in models.json. */
+	jev: { model: string };
 }
 
 export interface AutoApproveConfig {
@@ -91,7 +101,8 @@ function engineDefaults(): Pick<AutoApproveConfig, "defaultMode" | "evaluator"> 
 	const evaluator = raw.evaluator as Partial<EvaluatorConfig> | undefined;
 	if (!isMode(raw.defaultMode) || !evaluator || !isEffort(evaluator.reasoningEffort) ||
 		typeof evaluator.timeoutMs !== "number" || !Number.isFinite(evaluator.timeoutMs) || evaluator.timeoutMs <= 0 ||
-		typeof evaluator.memoize !== "boolean") {
+		typeof evaluator.memoize !== "boolean" || !isBackend(evaluator.backend) ||
+		typeof evaluator.jev?.model !== "string" || !evaluator.jev.model.trim()) {
 		throw new ImportResolutionError("auto-approve: invalid bundled engine settings");
 	}
 	return { defaultMode: raw.defaultMode, evaluator: evaluator as EvaluatorConfig };
@@ -141,12 +152,20 @@ export function seedConfig(path = configPath()): void {
 
 /** Persist a local override without changing imported policy files. */
 export function saveEvaluatorEffort(effort: EvaluatorConfig["reasoningEffort"], path = configPath()): void {
+	saveEvaluatorFields({ reasoningEffort: effort }, path);
+}
+
+export function saveEvaluatorBackend(backend: EvaluatorBackend, path = configPath()): void {
+	saveEvaluatorFields({ backend }, path);
+}
+
+function saveEvaluatorFields(fields: Record<string, unknown>, path: string): void {
 	const raw = existsSync(path) ? readRawConfig(path) : {};
 	const evaluator = raw.evaluator && typeof raw.evaluator === "object" && !Array.isArray(raw.evaluator)
 		? raw.evaluator as Record<string, unknown>
 		: {};
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify({ ...raw, evaluator: { ...evaluator, reasoningEffort: effort } }, null, 2)}\n`);
+	writeFileSync(path, `${JSON.stringify({ ...raw, evaluator: { ...evaluator, ...fields } }, null, 2)}\n`);
 }
 
 function asMatchers(value: unknown): Matcher[] {
@@ -304,12 +323,13 @@ export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 		return {
 			defaultMode: "manual", allow: [], deny: [], context: [], writeRoots: [], readRoots: [],
 			// Manual mode does not evaluate unmatched calls.
-			evaluator: defaults?.evaluator ?? { reasoningEffort: "low", timeoutMs: 0, memoize: false },
+			evaluator: defaults?.evaluator ?? { reasoningEffort: "low", timeoutMs: 0, memoize: false, backend: "chat", jev: { model: "jev-latest" } },
 			logEvaluations: false,
 		};
 	}
 
 	const rawEval = (raw.evaluator && typeof raw.evaluator === "object" ? raw.evaluator : {}) as Partial<EvaluatorConfig>;
+	const rawJev = rawEval.jev && typeof rawEval.jev === "object" ? rawEval.jev as Partial<EvaluatorConfig["jev"]> : undefined;
 
 	return {
 		defaultMode: isMode(raw.defaultMode) ? raw.defaultMode : defaults.defaultMode,
@@ -322,6 +342,10 @@ export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 			reasoningEffort: isEffort(rawEval.reasoningEffort) ? rawEval.reasoningEffort : defaults.evaluator.reasoningEffort,
 			timeoutMs: typeof rawEval.timeoutMs === "number" && Number.isFinite(rawEval.timeoutMs) && rawEval.timeoutMs > 0 ? rawEval.timeoutMs : defaults.evaluator.timeoutMs,
 			memoize: typeof rawEval.memoize === "boolean" ? rawEval.memoize : defaults.evaluator.memoize,
+			backend: isBackend(rawEval.backend) ? rawEval.backend : defaults.evaluator.backend,
+			jev: {
+				model: typeof rawJev?.model === "string" && rawJev.model.trim() ? rawJev.model : defaults.evaluator.jev.model,
+			},
 		},
 		logEvaluations: raw.logEvaluations === true,
 	};

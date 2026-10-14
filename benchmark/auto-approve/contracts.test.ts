@@ -295,6 +295,18 @@ check("rejects negative pricing threshold", !isRunResult({
 check("requires complete tier rate cards", !isRunResult({
 	...runResult, modelIdentity: { ...tieredIdentity, pricing: { ...tieredIdentity.pricing, tiers: [{ inputTokensAbove: 100 }] } },
 }));
+const classifierIdentity = {
+	piCodingAgentVersion: "1.1.0", piAiVersion: "1.1.0", api: "typesafe-system-one",
+	questionSchemaHash: "questions",
+	pricing: { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 },
+};
+check("accepts a classifier model identity", isRunResult({ ...runResult, modelIdentity: classifierIdentity }));
+check("rejects a classifier identity without the question schema hash", !isRunResult({
+	...runResult, modelIdentity: { ...classifierIdentity, questionSchemaHash: undefined },
+}));
+check("rejects a chat identity missing the catalog hash", !isRunResult({
+	...runResult, modelIdentity: { ...runResult.modelIdentity, catalogHash: undefined },
+}));
 const failedRun = JSON.parse(JSON.stringify(runResult));
 failedRun.outcomes[0].result = { kind: "failure", failure: "crash", detail: "boom" };
 check("rejects an unknown failure kind", !isRunResult(failedRun));
