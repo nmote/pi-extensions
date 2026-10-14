@@ -195,9 +195,9 @@ async function main(): Promise<void> {
 			type: "custom",
 			customType: "auto-approve-evaluation",
 			data: {
-				tool: "read",
+				tool: "write",
 				command: metadataPath,
-				input: { path: metadataPath },
+				input: { path: metadataPath, content: "" },
 				instructions: [scope],
 				effort: "low",
 				output: { decision: "review", reason: "repository metadata" },
@@ -262,8 +262,16 @@ async function main(): Promise<void> {
 			(await gate({ toolName: "read", input: { path: `@${installDocReads[0]}` } }, ctx)) === undefined &&
 				evaluatorRequests.length === 0,
 		);
-		await gate({ toolName: "read", input: { path: "/shared/x/.git/config" } }, ctx);
-		check("read of .git within readRoots is evaluated", evaluatorRequests.length === 1);
+		for (const metadata of [".git", ".hg"]) {
+			for (const path of [`${metadata}/config`, `/shared/x/${metadata}/config`]) {
+				check(
+					`read of ${path} is approved without evaluation`,
+					(await gate({ toolName: "read", input: { path } }, ctx)) === undefined && evaluatorRequests.length === 0,
+				);
+			}
+		}
+		await gate({ toolName: "write", input: { path: "/shared/x/.git/config", content: "" } }, ctx);
+		check("write of .git within readRoots is evaluated", evaluatorRequests.length === 1);
 		check("gate brackets and clears evaluation status", statuses.at(-2)?.value === "[evaluating…]" && statuses.at(-1)?.value === undefined);
 		await gate({ toolName: "write", input: { path: "/shared/file.ts", content: "" } }, ctx);
 		check(
@@ -291,9 +299,9 @@ async function main(): Promise<void> {
 		);
 		process.env[SUBAGENT_TOKEN_ENV] = "child-token";
 		const noticesBeforeChildStat = notices.length;
-		const metadataRead = await gate({ toolName: "read", input: { path: metadataPath } }, ctx);
+		const metadataWrite = await gate({ toolName: "write", input: { path: metadataPath, content: "" } }, ctx);
 		delete process.env[SUBAGENT_TOKEN_ENV];
-		check("read within .git falls through to evaluation", metadataRead?.reason.includes("repository metadata"));
+		check("write within .git falls through to evaluation", metadataWrite?.reason.includes("repository metadata"));
 		check(
 			"child stat increments are reported to the parent",
 			notices.length === noticesBeforeChildStat + 1 &&
@@ -520,6 +528,14 @@ async function main(): Promise<void> {
 			await evaluated("write", { path: "escdir/new.txt", content: "" }),
 		);
 		check("write through a dangling symlink is evaluated", await evaluated("write", { path: "dangling", content: "" }));
+		for (const metadata of [".git", ".hg"]) {
+			mkdirSync(join(links, "real", metadata));
+			writeFileSync(join(links, "real", metadata, "config"), "");
+			symlinkSync(`${metadata}/config`, join(links, "real", `${metadata}-link`));
+			check("in-scope metadata symlink reads are approved", !(await evaluated("read", { path: `${metadata}-link` })));
+			check("metadata symlink writes are evaluated", await evaluated("write", { path: `${metadata}-link`, content: "" }));
+			check("direct metadata edits are evaluated", await evaluated("edit", { path: `${metadata}/config`, edits: [] }));
+		}
 
 		process.env[SUBAGENT_TOKEN_ENV] = "child-token";
 		const previousRunId = process.env[SUBAGENT_RUN_ID_ENV];

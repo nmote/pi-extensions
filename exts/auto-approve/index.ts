@@ -646,8 +646,9 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		const path = typeof rawInput.path === "string" ? rawInput.path : "";
 		const realPath = toolPaths(path, ctx.cwd)?.real;
 		if (
-			!isVersionControlMetadataPath(path, ctx.cwd, homeDir) &&
-			!(realPath !== undefined && isVersionControlMetadataPath(realPath, ctx.cwd))
+			toolName === "read" ||
+			(!isVersionControlMetadataPath(path, ctx.cwd, homeDir) &&
+				!(realPath !== undefined && isVersionControlMetadataPath(realPath, ctx.cwd)))
 		) {
 			// Global skills load without requiring a machine-specific allow-list entry.
 			// Lexical, since skill installers may symlink into the skills directory.
