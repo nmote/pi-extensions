@@ -18,6 +18,7 @@ interface Row extends Entry {
 	error?: string;
 	aggregates?: RunResult["aggregates"];
 	averageEstimatedCostUsd?: number | null;
+	totalEstimatedCostUsd?: number | null;
 	averageLatencyMs?: number | null;
 }
 const here = fileURLToPath(new URL("./", import.meta.url));
@@ -56,9 +57,15 @@ export function formatMatrix(rows: Row[]): string {
 		return [`${row.provider}/${row.model} (${row.effort})`, score(a?.precision), score(a?.recall), score(a?.f2),
 			a ? `${a.consistency.unanimous}/${a.consistency.mixed}/${a.consistency.insufficient}` : "n/a",
 			row.averageEstimatedCostUsd == null ? "n/a" : `$${row.averageEstimatedCostUsd.toFixed(6)}`,
+			row.totalEstimatedCostUsd == null ? "n/a" : `$${row.totalEstimatedCostUsd.toFixed(4)}`,
 			row.averageLatencyMs == null ? "n/a" : row.averageLatencyMs.toFixed(1)];
 	});
-	const table = [["Evaluator", "Precision", "Recall", "F2", "Consistency (unanimous/mixed/insufficient)", "Avg cost/eval (USD)", "Avg latency (ms)"], ...lines];
+	const known = rows.flatMap((row) => row.totalEstimatedCostUsd == null ? [] : [row.totalEstimatedCostUsd]);
+	const total = known.length
+		? `$${known.reduce((sum, value) => sum + value, 0).toFixed(4)}${known.length < rows.length ? "+" : ""}`
+		: "n/a";
+	const table = [["Evaluator", "Precision", "Recall", "F2", "Consistency (unanimous/mixed/insufficient)", "Avg cost/eval (USD)", "Run cost (USD)", "Avg latency (ms)"], ...lines,
+		["Total", "", "", "", "", "", total, ""]];
 	const widths = table[0].map((_, i) => Math.max(...table.map((line) => line[i].length)));
 	return table.map((line) => line.map((cell, i) => cell.padEnd(widths[i])).join("  ").trimEnd()).join("\n");
 }
@@ -176,6 +183,7 @@ export async function main(args: string[], dependencies: Dependencies = {}): Pro
 					row.results = join(reportDir, "results.json");
 					row.aggregates = report.aggregates;
 					row.averageEstimatedCostUsd = report.usage.averageEstimatedCostUsd;
+					row.totalEstimatedCostUsd = report.usage.totalEstimatedCostUsd;
 					row.averageLatencyMs = report.latency.averageMs;
 					if (report.aggregates.failed) {
 						if (!controller.signal.aborted) row.status = "failed";

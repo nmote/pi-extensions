@@ -77,11 +77,14 @@ command; it does not check model availability.
 Actual runs check the built-in physical chat-model catalog, without custom
 models or network refresh. Unavailable models and failed runs do not prevent
 later entries from running. Stdout shows only evaluator labels, review-positive
-precision, recall, F2, unanimous/mixed/insufficient consistency counts, and
-average estimated cost per evaluation in USD, and average latency in
-milliseconds. Latency includes request/auth time for valid and failed attempts.
+precision, recall, F2, unanimous/mixed/insufficient consistency counts,
+average estimated cost per evaluation in USD, the full estimated run cost in
+USD, and average latency in milliseconds. A final row totals the run costs; a
+trailing `+` marks a partial total when some entries have unknown cost.
+Latency includes request/auth time for valid and failed attempts.
 Cost uses the report's average over attempts with known cost, including failures;
-it is a catalog estimate, not provider billing. Unknown costs, absent latency,
+it is a catalog estimate, not provider billing. The run cost is unknown if any
+attempt lacks a cost. Unknown costs, absent latency,
 and missing scores are `n/a`. Failed
 attempts remain excluded from score denominators; stderr warns when a report
 excludes failures.
