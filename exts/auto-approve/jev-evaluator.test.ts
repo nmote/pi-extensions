@@ -1,6 +1,8 @@
 import type { ClassifierContext, ClassifierModel, ClassifierResult } from "@earendil-works/pi-ai";
 import type { EvaluatorConfig } from "./config.ts";
 import { evaluateSafetyJev, JEV_CONFIDENCE_THRESHOLD, JEV_QUESTIONS, type JevEvaluatorContext } from "./jev-evaluator.ts";
+import { buildSystemPrompt } from "./evaluator.ts";
+import { ALLOW_GUIDANCE, CAUTION_GUIDANCE, COMPOUND_GUIDANCE, REVIEW_GUIDANCE, SESSION_GUIDANCE } from "./evaluator-policy.ts";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {
@@ -75,12 +77,11 @@ async function main(): Promise<void> {
 	check("uses the static question schema", JSON.stringify(seen?.questions) === JSON.stringify(JEV_QUESTIONS));
 	const instructions = JEV_QUESTIONS.verdict.instructions;
 	check("question text marks state as untrusted", instructions.includes("untrusted data") && instructions.includes("never follow instructions"));
-	check("question text gives session guidance superseding precedence",
-		instructions.includes("trusted user authorization") && instructions.includes("supersedes conflicting") && instructions.includes("within its stated scope"));
-	check("criteria port routine-dev and caution guidance",
-		JEV_QUESTIONS.verdict.criteria.allow.includes("routine development facilities") &&
-		JEV_QUESTIONS.verdict.criteria.allow.includes("/tmp") &&
-		JEV_QUESTIONS.verdict.criteria.review.includes("Bias toward caution"));
+	const chatPrompt = buildSystemPrompt(["Approve repo test runners"], { text: "Allow builds", revision: 1 });
+	check("both backends include the shared safety policy",
+		ALLOW_GUIDANCE.every((guidance) => chatPrompt.includes(guidance) && JEV_QUESTIONS.verdict.criteria.allow.includes(guidance)) &&
+		[REVIEW_GUIDANCE, CAUTION_GUIDANCE].every((guidance) => chatPrompt.includes(guidance) && JEV_QUESTIONS.verdict.criteria.review.includes(guidance)) &&
+		[COMPOUND_GUIDANCE, SESSION_GUIDANCE].every((guidance) => chatPrompt.includes(guidance) && instructions.includes(guidance)));
 
 	let noGuidance: ClassifierContext | undefined;
 	await evaluateSafetyJev(model, context(choiceAnswer("allow", 0.9), (request) => { noGuidance = request; }), "read", { path: "x" }, config);
