@@ -14,7 +14,9 @@ const MAX_OUTCOME_CONTEXT_CHARS = 5_000;
 const MAX_TOOL_CONTEXT_CHARS = 800;
 const MAX_BACKLOG_ITEMS = 10;
 const MAX_BACKLOG_TITLE_CHARS = 240;
-const MAX_TOPIC_CHARS = 48;
+// The prompt requests a max of 48, but models don't always respect that. Give a
+// bit of breathing room rather than rejecting such responses outright.
+const MAX_TOPIC_CHARS = 64;
 const MIN_TOPIC_WORDS = 3;
 const MAX_TOPIC_WORDS = 8;
 export const METADATA_TIMEOUT_MS = 20_000;

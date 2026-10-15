@@ -66,6 +66,9 @@ async function main(): Promise<void> {
 	check("strips a plain topic prefix", parseTopic("Topic: Add automatic Pi session topics.") === "Add automatic Pi session topics");
 	check("rejects short topics", parseTopic("Pi topics") === undefined);
 	check("rejects long topics", parseTopic("one two three four five six seven eight nine") === undefined);
+	const limitTopic = `${"a".repeat(60)} b c`;
+	check("accepts topics at the character limit", parseTopic(limitTopic) === limitTopic);
+	check("rejects topics over the character limit", parseTopic(`a${limitTopic}`) === undefined);
 	check("rejects multiline output", parseTopic("Good session topic\nextra text") === undefined);
 	check("parses a bounded prompt summary", parsePromptSummary("Add a persistent latest-request widget") !== undefined);
 	check("normalizes multiline prompt summaries", parsePromptSummary("first line\nsecond line") === "first line second line");
