@@ -133,10 +133,8 @@ if (args.includes('--dry-run')) {
 	assert.equal(stdout, `${await readFile(join(first, "summary.txt"), "utf8")}`);
 	assert.match(stdout, /n\/a/);
 	assert.match(stdout, /1\/0\/0\s+n\/a/);
-	assert.match(stdout, /Avg cost\/eval \(USD\)/);
-	assert.match(stdout, /Run cost \(USD\)/);
-	assert.match(stdout, /Avg latency \(ms\)/);
-	assert.match(stdout, /1\/0\/0\s+n\/a\s+n\/a\s+1\.0\s+0 \(0\.0%\)$/m);
+	assert.match(stdout, /Prec\s+Recall\s+F2\s+U\/M\/I\s+\$\/eval\s+\$run\s+Lat ms\s+Chat %/);
+	assert.match(stdout, /1\/0\/0\s+n\/a\s+n\/a\s+1\s+—$/m);
 	assert.match(stdout, /^Total\s+n\/a$/m, "No known run costs yields an n/a grand total");
 	assert.equal(manifest.entries[2].averageEstimatedCostUsd, null);
 	assert.equal(manifest.entries[2].totalEstimatedCostUsd, null);
@@ -187,20 +185,26 @@ if (args.includes('--dry-run')) {
 	assert.ok(retained.entries[0].aggregates);
 	assert.ok(retained.entries[1].aggregates, "JSON scores survive missing text report");
 	assert.match(stderr, /scores exclude 2 failed attempts/);
-	assert.match(stdout, /openai\/gpt-6-luna \(medium\)\s+n\/a\s+n\/a\s+n\/a\s+0\/0\/1\s+\$0\.000123\s+n\/a/);
+	assert.match(stdout, /^luna\s+n\/a\s+n\/a\s+n\/a\s+0\/0\/1\s+\$0\.000123\s+n\/a/m);
 	assert.equal(retained.entries[0].averageEstimatedCostUsd, 0.000123, "Average uses priced attempts, including failures");
 	assert.equal(retained.entries[0].totalEstimatedCostUsd, null, "Full run cost is unknown when any attempt lacks cost");
 	assert.equal(retained.entries[0].averageLatencyMs, 1, "Latency includes failed attempts");
 	const costTable = formatMatrix([
-		{ ...entry, provider: "p", model: "missing", status: "failed" },
-		{ ...entry, provider: "p", model: "zero", status: "completed", averageEstimatedCostUsd: 0, totalEstimatedCostUsd: 0, averageLatencyMs: 0 },
-		{ ...entry, provider: "p", model: "priced", status: "completed", totalEstimatedCostUsd: 1.25, averageLatencyMs: null },
-		{ ...entry, provider: "p", model: "unknown", status: "completed", averageLatencyMs: null },
+		{ ...entry, id: "missing", provider: "p", model: "missing", status: "failed" },
+		{ ...entry, id: "zero", provider: "p", model: "zero", status: "completed", averageEstimatedCostUsd: 0, totalEstimatedCostUsd: 0, averageLatencyMs: 0 },
+		{ ...entry, id: "priced", provider: "p", model: "priced", status: "completed", totalEstimatedCostUsd: 1.25, averageLatencyMs: 12.6 },
+		{ ...entry, id: "unknown", kind: "classifier", status: "completed", fallbackRate: null },
+		{ ...entry, id: "hybrid-zero", kind: "classifier", status: "completed", fallbackRate: 0 },
+		{ ...entry, id: "hybrid", kind: "classifier", status: "completed", fallbackRate: 0.125 },
 	]);
-	assert.match(costTable, /missing.*n\/a$/m);
-	assert.match(costTable, /zero.*\$0\.000000\s+\$0\.0000\s+0\.0\s+n\/a$/m);
-	assert.match(costTable, /priced.*\$1\.2500\s+n\/a\s+n\/a$/m);
-	assert.match(costTable, /unknown.*n\/a$/m);
+	assert.match(costTable, /^missing.*n\/a\s+—$/m);
+	assert.match(costTable, /^zero.*\$0\.000000\s+\$0\.0000\s+0\s+—$/m);
+	assert.match(costTable, /^priced.*\$1\.2500\s+13\s+—$/m);
+	assert.match(costTable, /^unknown.*n\/a$/m);
+	assert.match(costTable, /^hybrid-zero.*\s0\.0%$/m);
+	assert.match(costTable, /^hybrid .*\s12\.5%$/m);
+	assert.ok(costTable.split("\n").every((line) => line.length <= 100));
+	assert.match(costTable, /Model identities and effort: manifest\.json/);
 	assert.match(costTable, /^Total\s+\$1\.2500\+$/m, "Grand total sums known run costs and marks partial totals");
 
 	process.env.MATRIX_TEST_MODE = "success";

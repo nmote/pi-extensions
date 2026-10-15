@@ -95,21 +95,24 @@ export function formatMatrix(rows: Row[]): string {
 	const score = (value: number | null | undefined) => value == null ? "n/a" : value.toFixed(4);
 	const lines = rows.map((row) => {
 		const a = row.aggregates;
-		return [`${row.id}: ${row.provider ? `${row.provider}/${row.model}` : "unavailable"} (${row.effort})`, score(a?.precision), score(a?.recall), score(a?.f2),
+		return [row.id, score(a?.precision), score(a?.recall), score(a?.f2),
 			a ? `${a.consistency.unanimous}/${a.consistency.mixed}/${a.consistency.insufficient}` : "n/a",
 			row.averageEstimatedCostUsd == null ? "n/a" : `$${row.averageEstimatedCostUsd.toFixed(6)}`,
 			row.totalEstimatedCostUsd == null ? "n/a" : `$${row.totalEstimatedCostUsd.toFixed(4)}`,
-			row.averageLatencyMs == null ? "n/a" : row.averageLatencyMs.toFixed(1),
-			row.fallbackCount == null ? "n/a" : `${row.fallbackCount} (${((row.fallbackRate ?? 0) * 100).toFixed(1)}%)`];
+			row.averageLatencyMs == null ? "n/a" : row.averageLatencyMs.toFixed(0),
+			row.kind !== "classifier" ? "—" : row.fallbackRate == null ? "n/a" : `${(row.fallbackRate * 100).toFixed(1)}%`];
 	});
 	const known = rows.flatMap((row) => row.totalEstimatedCostUsd == null ? [] : [row.totalEstimatedCostUsd]);
 	const total = known.length
 		? `$${known.reduce((sum, value) => sum + value, 0).toFixed(4)}${known.length < rows.length ? "+" : ""}`
 		: "n/a";
-	const table = [["Evaluator", "Precision", "Recall", "F2", "Consistency (unanimous/mixed/insufficient)", "Avg cost/eval (USD)", "Run cost (USD)", "Avg latency (ms)", "Chat fallbacks"], ...lines,
+	const table = [["Evaluator", "Prec", "Recall", "F2", "U/M/I", "$/eval", "$run", "Lat ms", "Chat %"], ...lines,
 		["Total", "", "", "", "", "", total, "", ""]];
 	const widths = table[0].map((_, i) => Math.max(...table.map((line) => line[i].length)));
-	return table.map((line) => line.map((cell, i) => cell.padEnd(widths[i])).join("  ").trimEnd()).join("\n");
+	return table.map((line) => line.map((cell, i) => i === 0 ? cell.padEnd(widths[i]) : cell.padStart(widths[i])).join("  ").trimEnd()).join("\n") +
+		"\n\nU/M/I = unanimous/mixed/insufficient; costs in USD.\n" +
+		"Lat = average latency; Chat % = fallback rate (— = non-hybrid).\n" +
+		"Model identities and effort: manifest.json.";
 }
 
 async function childRun(runner: string, args: string[], signal: AbortSignal, logs?: { stdout: string; stderr: string }) {

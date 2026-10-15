@@ -125,10 +125,12 @@ be combined with `--dry-run`.
 
 Actual runs use built-in physical chat/classifier models, without custom models
 or network catalog refresh. Unavailable automatic rows and failed runs do not
-prevent later entries from running. Stdout shows only evaluator labels, review-positive
-precision, recall, F2, unanimous/mixed/insufficient consistency counts,
+prevent later entries from running. Stdout shows evaluator IDs, review-positive
+precision, recall, F2, unanimous/mixed/insufficient consistency counts (`U/M/I`),
 average estimated cost per evaluation in USD, the full estimated run cost in
-USD, average latency in milliseconds, and chat fallback count/rate. A final row totals the run costs; a
+USD, average latency rounded to whole milliseconds, and chat fallback percentage
+(`—` for non-hybrid evaluators). Model identities, effort, and fallback counts
+remain in `manifest.json`. A final row totals the run costs; a
 trailing `+` marks a partial total when some entries have unknown cost.
 Latency includes request/auth time for valid and failed attempts.
 Cost uses the report's average over attempts with known cost, including failures;
