@@ -65,7 +65,7 @@ import {
 	symlinkNote,
 } from "./rules.ts";
 import { type EvaluationResult, evaluateSafety } from "./evaluator.ts";
-import { evaluateSafetyJev } from "./jev-evaluator.ts";
+import { evaluateSafetyHybrid, HYBRID_CONFIDENCE_THRESHOLD } from "./hybrid-evaluator.ts";
 import { explainJevDenial } from "./denial-explanation.ts";
 import { EVAL_LOG_SCHEMA_VERSION, type EvalLogRecord } from "./eval-log.ts";
 import { EvalLogWriter } from "./eval-writer.ts";
@@ -315,11 +315,13 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		ctx.ui.notify(`Auto-approve evaluator effort: ${effort}`, "info");
 	}
 
-	function evaluatorLabel(): string {
-		return config.evaluator.backend === "jev"
-			? `jev (${config.evaluator.jev.provider}/${config.evaluator.jev.model})`
-			: "chat model (managed by /small-model)";
+	function evaluatorLabel(chatModel?: { provider: string; id: string }): string {
+		if (config.evaluator.backend !== "jev") return "chat model (managed by /small-model)";
+		const chat = chatModel ? { provider: chatModel.provider, model: chatModel.id } : loadSmallModel();
+		return `jev (${config.evaluator.jev.provider}/${config.evaluator.jev.model}) + small model (${chat.provider ?? "unset"}/${chat.model ?? "unset"}; fallback < ${HYBRID_CONFIDENCE_THRESHOLD})`;
 	}
+
+	let cachedEvaluatorIdentity: string | undefined;
 
 	function setBackend(backend: EvaluatorBackend, ctx: ExtensionContext, jev?: AutoApproveConfig["evaluator"]["jev"]): void {
 		try {
@@ -341,6 +343,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		rawInput: Record<string, unknown>,
 		instructions: readonly string[],
 		policy: ApprovalGuidance,
+		chatModel?: Awaited<ReturnType<typeof ensureSmallModel>>,
 	): Promise<{ model: { provider: string; id: string }; result: EvaluationResult } | undefined> {
 		if (config.evaluator.backend === "jev") {
 			const { provider, model } = config.evaluator.jev;
@@ -353,10 +356,16 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				ctx.ui.notify(`Auto-approve: Jev credentials missing; run /login ${provider}${provider === "cloudflare-workers-ai" ? " and configure CLOUDFLARE_ACCOUNT_ID" : ""}, or run /auto evaluator`, "warning");
 				return undefined;
 			}
-			const result = await evaluateSafetyJev(classifier, ctx, toolName, rawInput, config.evaluator, instructions, policy);
+			const chat = chatModel ?? await ensureSmallModel(ctx, { signal: ctx.signal });
+			if (!chat) {
+				ctx.ui.notify("Auto-approve: Jev requires an authenticated chat model; configure /small-model", "warning");
+				return undefined;
+			}
+			const result = await evaluateSafetyHybrid(classifier, chat, ctx, toolName, rawInput, config.evaluator, instructions, policy);
 			return {
-				model: { provider: classifier.provider, id: classifier.id },
-				result: await explainJevDenial(result, ctx, toolName, rawInput, config.evaluator, instructions, policy),
+				model: result.routing?.fallbackUsed ? chat : { provider: classifier.provider, id: classifier.id },
+				result: result.routing?.fallbackUsed ? result
+					: await explainJevDenial(result, ctx, toolName, rawInput, config.evaluator, instructions, policy),
 			};
 		}
 		const model = await ensureSmallModel(ctx);
@@ -454,6 +463,13 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				guidance: attempt.policy.text ? { text: attempt.policy.text, revision: attempt.policy.revision } : null,
 				model: { provider: attempt.model.provider, model: attempt.model.id },
 				effort: attempt.effort,
+				...(attempt.result.routing ? { routing: {
+					classifierModel: attempt.result.routing.classifierModel,
+					chatModel: attempt.result.routing.chatModel,
+					classifierChoice: attempt.result.routing.classifierChoice,
+					confidence: attempt.result.routing.confidence,
+					fallbackUsed: attempt.result.routing.fallbackUsed,
+				} } : {}),
 				decision: attempt.result.decision,
 				reason: attempt.result.reason,
 				status,
@@ -703,14 +719,25 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				const policy = await exchangeGuidance({ action: "get" }, ctx);
 				const context = evaluatorContext(input, ctx.cwd);
 				const effort = config.evaluator.reasoningEffort;
-				const evaluator = evaluatorLabel();
+				const chat = config.evaluator.backend === "jev" ? await ensureSmallModel(ctx, { signal: ctx.signal }) : undefined;
+				if (config.evaluator.backend === "jev" && !chat) {
+					return softReject(ctx, toolName, rawInput, input, "Jev requires an authenticated chat model; configure /small-model", true);
+				}
+				const evaluator = evaluatorLabel(chat);
+				if (evaluator !== evaluatorLabel()) {
+					return softReject(ctx, toolName, rawInput, input, "small model selection changed or could not be saved; configure /small-model and retry", true);
+				}
+				if (cachedEvaluatorIdentity !== evaluator) {
+					evaluatorCache.clear();
+					cachedEvaluatorIdentity = evaluator;
+				}
 				let result = config.evaluator.memoize ? evaluatorCache.get(input, context.instructions, policy) : undefined;
 				const cached = !!result;
 				let evaluated: { model: { provider: string; id: string }; result: EvaluationResult } | undefined;
 				if (!result) {
 					ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, ctx.ui.theme.fg("muted", "[evaluating…]"));
 					try {
-						evaluated = await evaluateWithBackend(ctx, toolName, rawInput, context.instructions, policy);
+						evaluated = await evaluateWithBackend(ctx, toolName, rawInput, context.instructions, policy, chat);
 					} finally {
 						ctx.ui.setStatus(AUTO_APPROVE_EVAL_STATUS_KEY, undefined);
 					}
@@ -834,7 +861,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				}
 				const choice = requested || await ctx.ui.select(
 					`Evaluator backend (current: ${config.evaluator.backend}):`,
-					["Chat model (managed by /small-model)", "Jev"],
+					["Chat model (managed by /small-model)", "Jev + small model"],
 				);
 				const backend = requested || (choice?.startsWith("Jev") ? "jev" : choice ? "chat" : undefined);
 				if (!isBackend(backend)) return;
@@ -864,7 +891,13 @@ export default function autoApprove(pi: ExtensionAPI): void {
 					const providerChoice = await ctx.ui.select("Jev provider:", labels);
 					selected = available.find((_, index) => labels[index] === providerChoice);
 				}
-				if (selected) setBackend(backend, ctx, selected);
+				if (selected) {
+					if (!await ensureSmallModel(ctx, { signal: ctx.signal })) {
+						ctx.ui.notify("Auto-approve: Jev requires an authenticated chat model; configure /small-model", "warning");
+						return;
+					}
+					setBackend(backend, ctx, selected);
+				}
 				return;
 			}
 
@@ -940,6 +973,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		humanDenied.clear();
 		evaluatorCache.clear();
 		stats = emptyStats();
+		cachedEvaluatorIdentity = evaluatorLabel();
 		for (const e of entries) {
 			if (e.type !== "custom") continue;
 			const data = e.data as { mode?: unknown; effort?: unknown; evaluator?: unknown; key?: unknown } | undefined;

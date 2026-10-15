@@ -1,7 +1,7 @@
 /**
  * Private log-record contract for auto-approve evaluator decisions.
  *
- * One record per actual model attempt, written for benchmark case curation:
+ * One record per evaluator invocation, written for benchmark case curation:
  * the example (tool/input/cwd/context/guidance snapshot) is the data; the
  * evaluator's decision is incidental. Cache hits are never logged, and
  * rendered prompts and standard extension guidance are never recorded — only
@@ -66,6 +66,13 @@ export const evalLogRecordSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		effort: effortSchema,
+		routing: Type.Optional(Type.Object({
+			classifierModel: Type.Object({ provider: Type.String(), id: Type.String() }, { additionalProperties: false }),
+			chatModel: Type.Object({ provider: Type.String(), id: Type.String() }, { additionalProperties: false }),
+			classifierChoice: Type.Union([verdictSchema, Type.Null()]),
+			confidence: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()]),
+			fallbackUsed: Type.Boolean(),
+		}, { additionalProperties: false })),
 		decision: verdictSchema,
 		reason: Type.String(),
 		status: Type.Union([Type.Literal("accepted"), Type.Literal("discarded")]),

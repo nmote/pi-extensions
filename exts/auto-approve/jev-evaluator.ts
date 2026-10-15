@@ -7,8 +7,8 @@
  * choice with probabilities, not prose, so the reason is synthesized.
  *
  * Fail-safe: any failure (no model, no auth, timeout, error stopReason, abort)
- * resolves to an uncacheable "review", never "allow". An "allow" verdict also
- * requires confidence at or above JEV_CONFIDENCE_THRESHOLD.
+ * resolves to an uncacheable "review", never "allow". Successful classifications
+ * carry confidence for the hybrid evaluator's routing decision.
  */
 
 import type { ClassifierApi, ClassifierModel, JsonObject, JsonValue, Usage } from "@earendil-works/pi-ai";
@@ -17,9 +17,6 @@ import type { EvaluatorConfig } from "./config.ts";
 import type { ApprovalGuidance } from "../shared/approval-guidance.ts";
 import type { EvaluationAttempt, EvaluationResult } from "./evaluator.ts";
 import { ALLOW_GUIDANCE, CAUTION_GUIDANCE, COMPOUND_GUIDANCE, REVIEW_GUIDANCE, SCOPE_GUIDANCE, SESSION_GUIDANCE } from "./evaluator-policy.ts";
-
-/** Minimum classifier confidence for an "allow" verdict. */
-export const JEV_CONFIDENCE_THRESHOLD = 0.5;
 
 /**
  * Static question schema; tool data and authorization arrive in `state`.
@@ -116,7 +113,8 @@ export async function evaluateSafetyJev(
 		}
 
 		const answer = result.answers.verdict;
-		if (answer?.type !== "choice") {
+		if (answer?.type !== "choice" || (answer.choice !== "allow" && answer.choice !== "review") ||
+			!Number.isFinite(answer.confidence) || answer.confidence < 0 || answer.confidence > 1) {
 			return {
 				decision: "review", reason: "evaluator returned no verdict", cacheable: false,
 				attempt: { ...attempt, failure: "error" },
@@ -124,10 +122,7 @@ export async function evaluateSafetyJev(
 		}
 		const probability = answer.probabilities[answer.choice];
 		const reason = `${answer.choice} (p=${probability === undefined ? "?" : probability.toFixed(2)}, confidence=${answer.confidence.toFixed(2)})`;
-		if (answer.choice === "allow" && answer.confidence >= JEV_CONFIDENCE_THRESHOLD) {
-			return { decision: "allow", reason, attempt };
-		}
-		return { decision: "review", reason, attempt };
+		return { decision: answer.choice, reason, attempt, classification: { choice: answer.choice, confidence: answer.confidence } };
 	} catch (e) {
 		const aborted = controller.signal.aborted;
 		return {

@@ -14,7 +14,11 @@
     { "provider": "fireworks", "model": "accounts/fireworks/models/glm-5p3-flash" },
     { "provider": "cloudflare-workers-ai", "model": "@cf/zai-org/glm-5.3-flash" }
   ] },
-  { "id": "jev", "kind": "classifier", "effort": "low", "candidates": [
+  { "id": "jev-haiku", "kind": "classifier", "effort": "medium", "chat": "haiku", "candidates": [
+    { "provider": "typesafe", "model": "jev-latest" },
+    { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
+  ] },
+  { "id": "jev-deepseek", "kind": "classifier", "effort": "medium", "chat": "deepseek", "candidates": [
     { "provider": "typesafe", "model": "jev-latest" },
     { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
   ] }

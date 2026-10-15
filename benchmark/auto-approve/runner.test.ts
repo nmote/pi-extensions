@@ -117,6 +117,27 @@ assert.equal(summarizeLatency(outcomes).attempts, outcomes.length);
 assert.equal(tokenUsage({ decision: "allow", reason: "", attempt: { ...parsed.attempt!, usage: { ...usage,
 	input: 0, output: 0, totalTokens: 0 } } }), null);
 
+// Hybrid accounting uses each stage's rate card, even when the deciding stage fails.
+const stage = { ...parsed.attempt!, usage };
+for (const unknownUsage of [false, true]) {
+	const [hybrid] = await runEvaluations({ cases: cases.slice(0, 1), model,
+		modelRegistry: context("{}").modelRegistry, effort: "medium", timeoutMs: 1000, repetitions: 1,
+		pricing, chatPricing: { ...pricing, input: 3 }, evaluate: async () => ({
+			decision: "review", cacheable: false, reason: "private failure",
+			attempt: { ...stage, failure: "parse" }, routing: { classifierChoice: "review", confidence: 0.2,
+				classifierModel: { provider: "fixture", id: "classifier" }, chatModel: { provider: "fixture", id: "chat" },
+				fallbackUsed: true, classifierAttempt: { ...stage, usage: unknownUsage ? null : usage },
+				chatAttempt: { ...stage, failure: "parse" } },
+		}),
+	});
+	assert.equal(hybrid.result.kind, "failure");
+	assert.equal(hybrid.routing?.classifierChoice, "review");
+	assert.equal(hybrid.routing?.chatAttempt?.failure, "parse");
+	assert.equal(hybrid.usage?.input ?? null, unknownUsage ? null : 20);
+	assert.equal(hybrid.estimatedCostUsd, unknownUsage ? null : 0.000048);
+	assert.ok(!JSON.stringify(hybrid).includes("private failure"));
+}
+
 const stop = new AbortController();
 let attempts = 0;
 await assert.rejects(runEvaluations({ cases, model, modelRegistry: context("{}").modelRegistry,
@@ -131,7 +152,7 @@ if (!options.help) assert.equal(options.repetitions, 3);
 assert.throws(() => cliOptions(["--provider", "test", "--model", "test", "--timeout-ms", "2147483648"]));
 assert.throws(() => cliOptions(["--provider", "test", "--model", "test", "--repetitions", "0"]));
 const dry = spawnSync(process.execPath, ["--import", "tsx", "benchmark/auto-approve/run.ts",
-	"--provider", "test", "--model", "a/b", "--dry-run", "--json", "--auth-path", "/nonexistent/auth.json"],
+	"--provider", "anthropic", "--model", "claude-haiku-5-5", "--dry-run", "--json", "--auth-path", "/nonexistent/auth.json"],
 	{ encoding: "utf8" });
 assert.equal(dry.status, 0, dry.stderr);
 const report = JSON.parse(dry.stdout);

@@ -49,7 +49,7 @@ try {
 	// Exercise the real runner's reconstruction, with nonexistent credentials and no log directory.
 	const dryLogs = join(directory, "dry-logs");
 	assert.equal(await main(["--dry-run", "--auth-path", join(directory, "absent-auth"), "--log-dir", dryLogs]), 0);
-	assert.equal(stdout.split("planned requests").length - 1, 5);
+	assert.equal(stdout.split("planned evaluations").length - 1, 6);
 	await assert.rejects(stat(dryLogs), { code: "ENOENT" });
 	const invalid = join(directory, "invalid.jsonl");
 	await writeFile(invalid, "{}\n");
@@ -100,6 +100,12 @@ if (args.includes('--dry-run')) {
   report.provider = provider;
   report.model = option('--model');
   report.effort = option('--effort');
+  if (option('--type') === 'classifier') {
+   report.modelIdentity = { api: 'typesafe-system-one', piAiVersion: 'fixture', piCodingAgentVersion: 'fixture',
+    pricing: report.modelIdentity.pricing, questionSchemaHash: 'fixture',
+    hybrid: { confidenceThreshold: 0.25, provider: option('--chat-provider'), model: option('--chat-model'),
+     effort: report.effort, identity: report.modelIdentity } };
+  }
   const logs = join(option('--log-dir'), 'run');
   await mkdir(logs, { mode: 0o700 });
   await writeFile(join(logs, 'results.json'), JSON.stringify(report), { mode: 0o600 });
@@ -117,20 +123,20 @@ if (args.includes('--dry-run')) {
 	stdout = stderr = "";
 	const checked: string[] = [];
 	assert.equal(await main(args, { runner, available: async (entry) => { checked.push(entry.provider); return entry.provider !== "openai" && entry.provider !== "openai-codex"; } }), 1);
-	assert.deepEqual(checked, ["openai", "openai-codex", "fireworks", "anthropic", "fireworks", "typesafe"]);
+	assert.deepEqual(checked, ["openai", "openai-codex", "fireworks", "anthropic", "fireworks", "typesafe", "typesafe"]);
 	const first = join(logDir, (await readdir(logDir))[0]);
 	const manifest = JSON.parse(await readFile(join(first, "manifest.json"), "utf8"));
 	assert.equal(manifest.schemaVersion, 2);
 	assert.equal(manifest.entries[0].id, "luna");
 	assert.equal(manifest.entries[0].provider, undefined);
-	assert.deepEqual(manifest.entries.map((row: { status: string }) => row.status), ["unavailable", "failed", "completed", "completed", "completed"]);
+	assert.deepEqual(manifest.entries.map((row: { status: string }) => row.status), ["unavailable", "failed", "completed", "completed", "completed", "completed"]);
 	assert.equal(stdout, `${await readFile(join(first, "summary.txt"), "utf8")}`);
 	assert.match(stdout, /n\/a/);
 	assert.match(stdout, /1\/0\/0\s+n\/a/);
 	assert.match(stdout, /Avg cost\/eval \(USD\)/);
 	assert.match(stdout, /Run cost \(USD\)/);
 	assert.match(stdout, /Avg latency \(ms\)/);
-	assert.match(stdout, /1\/0\/0\s+n\/a\s+n\/a\s+1\.0$/m);
+	assert.match(stdout, /1\/0\/0\s+n\/a\s+n\/a\s+1\.0\s+0 \(0\.0%\)$/m);
 	assert.match(stdout, /^Total\s+n\/a$/m, "No known run costs yields an n/a grand total");
 	assert.equal(manifest.entries[2].averageEstimatedCostUsd, null);
 	assert.equal(manifest.entries[2].totalEstimatedCostUsd, null);
@@ -172,12 +178,12 @@ if (args.includes('--dry-run')) {
 	};
 	assert.equal(await main(args, { runner }), 1);
 	assert.equal(initialized, 1);
-	assert.equal(catalogChecks.length, 5);
+	assert.equal(catalogChecks.length, 6);
 	assert.equal(catalogChecks[3], "chat:fireworks");
 	assert.equal(catalogChecks[4], "classifier:typesafe");
 	const second = (await readdir(logDir)).find((name) => join(logDir, name) !== first)!;
 	const retained = JSON.parse(await readFile(join(logDir, second, "manifest.json"), "utf8"));
-	assert.deepEqual(retained.entries.map((row: { status: string }) => row.status), ["failed", "failed", "completed", "completed", "completed"]);
+	assert.deepEqual(retained.entries.map((row: { status: string }) => row.status), ["failed", "failed", "completed", "completed", "completed", "completed"]);
 	assert.ok(retained.entries[0].aggregates);
 	assert.ok(retained.entries[1].aggregates, "JSON scores survive missing text report");
 	assert.match(stderr, /scores exclude 2 failed attempts/);
@@ -192,8 +198,8 @@ if (args.includes('--dry-run')) {
 		{ ...entry, provider: "p", model: "unknown", status: "completed", averageLatencyMs: null },
 	]);
 	assert.match(costTable, /missing.*n\/a$/m);
-	assert.match(costTable, /zero.*\$0\.000000\s+\$0\.0000\s+0\.0$/m);
-	assert.match(costTable, /priced.*\$1\.2500\s+n\/a$/m);
+	assert.match(costTable, /zero.*\$0\.000000\s+\$0\.0000\s+0\.0\s+n\/a$/m);
+	assert.match(costTable, /priced.*\$1\.2500\s+n\/a\s+n\/a$/m);
 	assert.match(costTable, /unknown.*n\/a$/m);
 	assert.match(costTable, /^Total\s+\$1\.2500\+$/m, "Grand total sums known run costs and marks partial totals");
 
@@ -202,14 +208,14 @@ if (args.includes('--dry-run')) {
 	assert.equal((await readdir(logDir)).length, 3, "Runs do not overwrite logs");
 
 	const bindingsPath = join(directory, "bindings.json");
-	await writeFile(bindingsPath, JSON.stringify({ jev: { provider: "cloudflare-workers-ai", model: "typesafe/jev" } }));
+	await writeFile(bindingsPath, JSON.stringify({ "jev-haiku": { provider: "cloudflare-workers-ai", model: "typesafe/jev" }, "jev-deepseek": { provider: "cloudflare-workers-ai", model: "typesafe/jev" } }));
 	const resolvedLogs = join(directory, "resolve-logs");
 	stdout = "";
 	const portable = async (candidate: { provider: string }) => candidate.provider === "cloudflare-workers-ai" || candidate.provider === "openai-codex" || candidate.provider === "anthropic";
 	assert.equal(await main(["--resolve-only", "--bindings", bindingsPath, "--log-dir", resolvedLogs], { runner, available: portable }), 0);
 	assert.match(stdout, /luna: openai-codex\/gpt-6-luna/);
 	assert.match(stdout, /deepseek: cloudflare-workers-ai\/@cf\/deepseek-ai\/deepseek-v4-flash-0731/);
-	assert.match(stdout, /jev: cloudflare-workers-ai\/typesafe\/jev \(classifier, low\)/);
+	assert.match(stdout, /jev-haiku: cloudflare-workers-ai\/typesafe\/jev \+ anthropic\/claude-haiku-5-5 \(classifier, medium\)/);
 	await assert.rejects(stat(resolvedLogs), { code: "ENOENT" });
 	assert.equal(await main(["--bindings", bindingsPath, "--log-dir", resolvedLogs], { runner, available: portable }), 0);
 	const portableManifest = JSON.parse(await readFile(join(resolvedLogs, (await readdir(resolvedLogs))[0], "manifest.json"), "utf8"));
@@ -217,7 +223,15 @@ if (args.includes('--dry-run')) {
 	assert.equal(portableManifest.entries[4].kind, "classifier");
 	const jevForwarded = JSON.parse(await readFile(join(directory, "cloudflare-workers-ai-args.json"), "utf8"));
 	assert.equal(jevForwarded[jevForwarded.indexOf("--type") + 1], "classifier");
+	assert.equal(jevForwarded[jevForwarded.indexOf("--chat-provider") + 1], "cloudflare-workers-ai");
+	assert.equal(jevForwarded[jevForwarded.indexOf("--chat-model") + 1], "@cf/deepseek-ai/deepseek-v4-flash-0731");
+	assert.equal(jevForwarded[jevForwarded.indexOf("--effort") + 1], "medium");
 	await assert.rejects(main(["--bindings", bindingsPath, "--resolve-only"], { runner, available: async () => false }), /Explicit binding unavailable/);
+
+	stdout = "";
+	assert.equal(await main(["--resolve-only"], { runner, available: async (candidate) => candidate.provider !== "anthropic" }), 1);
+	assert.match(stdout, /jev-haiku: unavailable/);
+	assert.match(stdout, /jev-deepseek: typesafe\/jev-latest \+ fireworks\//);
 
 	assert.equal(await main(["--resolve-only"], { runner, available: async (_entry, signal) => {
 		process.emit("SIGINT");
@@ -242,7 +256,7 @@ if (args.includes('--dry-run')) {
 	const interruptedDir = join(interruptedLogs, (await readdir(interruptedLogs))[0]);
 	const interrupted = JSON.parse(await readFile(join(interruptedDir, "manifest.json"), "utf8"));
 	assert.equal(interrupted.interrupted, true);
-	assert.deepEqual(interrupted.entries.map((row: { status: string }) => row.status), ["completed", "interrupted", "interrupted", "interrupted", "interrupted"]);
+	assert.deepEqual(interrupted.entries.map((row: { status: string }) => row.status), ["completed", "interrupted", "interrupted", "interrupted", "interrupted", "interrupted"]);
 	assert.ok(isRunResult(JSON.parse(await readFile(interrupted.entries[0].results, "utf8"))));
 	assert.equal(interrupted.entries[2].stdout, undefined);
 } finally {

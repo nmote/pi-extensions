@@ -8,11 +8,12 @@ import { cliOptions } from "./run.ts";
 import { isRunResult, type RunResult } from "./contracts.ts";
 
 interface Binding { provider: string; model: string }
-interface Entry { id: string; kind: "chat" | "classifier"; effort: "low" | "medium" | "high"; candidates: Binding[] }
-interface ResolvedEntry extends Binding { id: string; kind: Entry["kind"]; effort: Entry["effort"] }
+interface Entry { id: string; kind: "chat" | "classifier"; effort: "low" | "medium" | "high"; candidates: Binding[]; chat?: string }
+interface ResolvedEntry extends Binding { id: string; kind: Entry["kind"]; effort: Entry["effort"]; fallback?: Binding }
 interface Row extends Entry {
 	provider?: string;
 	model?: string;
+	fallback?: Binding;
 	status: "pending" | "unavailable" | "failed" | "completed" | "interrupted";
 	exitCode?: number | null;
 	results?: string;
@@ -21,6 +22,8 @@ interface Row extends Entry {
 	stderr?: string;
 	error?: string;
 	aggregates?: RunResult["aggregates"];
+	fallbackCount?: number;
+	fallbackRate?: number | null;
 	averageEstimatedCostUsd?: number | null;
 	totalEstimatedCostUsd?: number | null;
 	averageLatencyMs?: number | null;
@@ -31,7 +34,7 @@ export function loadMatrix(value: unknown): Entry[] {
 	if (!Array.isArray(value) || !value.length) throw new Error("Matrix must be a nonempty array");
 	const seen = new Set<string>();
 	for (const entry of value) {
-		if (!entry || typeof entry !== "object" || Object.keys(entry).sort().join() !== "candidates,effort,id,kind" ||
+		if (!entry || typeof entry !== "object" || Object.keys(entry).sort().join() !== (entry.kind === "classifier" ? "candidates,chat,effort,id,kind" : "candidates,effort,id,kind") ||
 			typeof entry.id !== "string" || !entry.id.trim() || !["chat", "classifier"].includes(entry.kind) ||
 			!["low", "medium", "high"].includes(entry.effort) || !Array.isArray(entry.candidates) ||
 			!entry.candidates.length || !entry.candidates.every(isBinding)) throw new Error("Invalid matrix entry");
@@ -41,6 +44,9 @@ export function loadMatrix(value: unknown): Entry[] {
 		const key = entry.id;
 		if (seen.has(key)) throw new Error("Duplicate matrix entry");
 		seen.add(key);
+	}
+	for (const entry of value) {
+		if (entry.kind === "classifier" && !value.some((chat) => chat.id === entry.chat && chat.kind === "chat")) throw new Error("Classifier requires a chat entry");
 	}
 	return value;
 }
@@ -93,14 +99,15 @@ export function formatMatrix(rows: Row[]): string {
 			a ? `${a.consistency.unanimous}/${a.consistency.mixed}/${a.consistency.insufficient}` : "n/a",
 			row.averageEstimatedCostUsd == null ? "n/a" : `$${row.averageEstimatedCostUsd.toFixed(6)}`,
 			row.totalEstimatedCostUsd == null ? "n/a" : `$${row.totalEstimatedCostUsd.toFixed(4)}`,
-			row.averageLatencyMs == null ? "n/a" : row.averageLatencyMs.toFixed(1)];
+			row.averageLatencyMs == null ? "n/a" : row.averageLatencyMs.toFixed(1),
+			row.fallbackCount == null ? "n/a" : `${row.fallbackCount} (${((row.fallbackRate ?? 0) * 100).toFixed(1)}%)`];
 	});
 	const known = rows.flatMap((row) => row.totalEstimatedCostUsd == null ? [] : [row.totalEstimatedCostUsd]);
 	const total = known.length
 		? `$${known.reduce((sum, value) => sum + value, 0).toFixed(4)}${known.length < rows.length ? "+" : ""}`
 		: "n/a";
-	const table = [["Evaluator", "Precision", "Recall", "F2", "Consistency (unanimous/mixed/insufficient)", "Avg cost/eval (USD)", "Run cost (USD)", "Avg latency (ms)"], ...lines,
-		["Total", "", "", "", "", "", total, ""]];
+	const table = [["Evaluator", "Precision", "Recall", "F2", "Consistency (unanimous/mixed/insufficient)", "Avg cost/eval (USD)", "Run cost (USD)", "Avg latency (ms)", "Chat fallbacks"], ...lines,
+		["Total", "", "", "", "", "", total, "", ""]];
 	const widths = table[0].map((_, i) => Math.max(...table.map((line) => line[i].length)));
 	return table.map((line) => line.map((cell, i) => cell.padEnd(widths[i])).join("  ").trimEnd()).join("\n");
 }
@@ -167,15 +174,18 @@ export async function main(args: string[], dependencies: Dependencies = {}): Pro
 	process.on("SIGINT", interrupt);
 	process.on("SIGTERM", interrupt);
 	try {
-		const runnerArgs = (entry: ResolvedEntry) => ["--provider", entry.provider, "--model", entry.model, "--type", entry.kind, "--effort", entry.effort, ...options.shared];
+		const runnerArgs = (entry: ResolvedEntry) => ["--provider", entry.provider, "--model", entry.model, "--type", entry.kind, "--effort", entry.effort,
+			...(entry.fallback ? ["--chat-provider", entry.fallback.provider, "--chat-model", entry.fallback.model] : []), ...options.shared];
 		for (const entry of entries) {
 			const candidate = Object.hasOwn(bindings, entry.id) ? bindings[entry.id] : entry.candidates[0];
-			const preview = await childRun(runner, [...runnerArgs({ ...entry, ...candidate }), "--dry-run", "--json"], controller.signal);
+			const chat = entries.find((item) => item.id === entry.chat);
+			const fallback = chat ? bindings[chat.id] ?? chat.candidates[0] : undefined;
+			const preview = await childRun(runner, [...runnerArgs({ ...entry, ...candidate, fallback }), "--dry-run", "--json"], controller.signal);
 			if (controller.signal.aborted) return 130;
 			if (preview.code !== 0) throw new Error("Matrix preflight failed; check dataset and options");
 			const planned: unknown = JSON.parse(preview.stdout).plannedRequests;
 			if (!Number.isSafeInteger(planned) || (planned as number) < 1) throw new Error("Invalid runner preview");
-			if (options.dryRun) console.log(`${entry.id} (${entry.kind}, ${entry.effort}): ${planned} planned requests; provider unresolved`);
+			if (options.dryRun) console.log(`${entry.id} (${entry.kind}, ${entry.effort}): ${planned} planned evaluations${entry.kind === "classifier" ? " (up to two model requests each)" : ""}; provider unresolved`);
 		}
 		if (options.dryRun) return 0;
 		let runtime: ModelRuntime | undefined;
@@ -187,12 +197,16 @@ export async function main(args: string[], dependencies: Dependencies = {}): Pro
 				!!runtime!.getPhysicalModel(entry.provider, entry.model)));
 		});
 		const resolved = new Map<string, ResolvedEntry>();
-		for (const entry of entries) {
+		for (const entry of [...entries].sort((a, b) => Number(a.kind === "classifier") - Number(b.kind === "classifier"))) {
 			const selected = await resolveEntry(entry, Object.hasOwn(bindings, entry.id) ? bindings[entry.id] : undefined,
 				(candidate) => available(candidate, controller.signal));
 			controller.signal.throwIfAborted();
-			if (selected) resolved.set(entry.id, selected);
-			if (options.resolveOnly) console.log(`${entry.id}: ${selected ? `${selected.provider}/${selected.model}` : "unavailable"} (${entry.kind}, ${entry.effort})`);
+			const fallback = entry.chat ? resolved.get(entry.chat) : undefined;
+			if (selected && (entry.kind === "chat" || fallback)) {
+				if (fallback) selected.fallback = { provider: fallback.provider, model: fallback.model };
+				resolved.set(entry.id, selected);
+			}
+			if (options.resolveOnly) console.log(`${entry.id}: ${resolved.has(entry.id) ? `${selected!.provider}/${selected!.model}${fallback ? ` + ${fallback.provider}/${fallback.model}` : ""}` : "unavailable"} (${entry.kind}, ${entry.effort})`);
 		}
 		if (options.resolveOnly) return resolved.size === entries.length ? 0 : 1;
 		await mkdir(options.logDir, { recursive: true, mode: 0o700 });
@@ -229,8 +243,14 @@ export async function main(args: string[], dependencies: Dependencies = {}): Pro
 					if (!isRunResult(report) || report.provider !== row.provider || report.model !== row.model || report.effort !== row.effort) {
 						throw new Error("Invalid runner report");
 					}
+					if (selected.fallback && (!("hybrid" in report.modelIdentity) ||
+						report.modelIdentity.hybrid?.provider !== selected.fallback.provider ||
+						report.modelIdentity.hybrid?.model !== selected.fallback.model ||
+						report.modelIdentity.hybrid?.effort !== selected.effort)) throw new Error("Hybrid identity mismatch");
 					row.results = join(reportDir, "results.json");
 					row.aggregates = report.aggregates;
+					row.fallbackCount = report.outcomes.filter((outcome) => outcome.routing?.fallbackUsed).length;
+					row.fallbackRate = report.outcomes.length ? row.fallbackCount / report.outcomes.length : null;
 					row.averageEstimatedCostUsd = report.usage.averageEstimatedCostUsd;
 					row.totalEstimatedCostUsd = report.usage.totalEstimatedCostUsd;
 					row.averageLatencyMs = report.latency.averageMs;

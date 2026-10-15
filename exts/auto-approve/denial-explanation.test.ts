@@ -60,10 +60,9 @@ try {
 	assert.equal(options.cacheRetention, "none");
 
 	response = { stopReason: "stop", content: [{ type: "text", text: "ALLOW" }] };
-	const uncertain = await explain({ ...review, reason: "allow (p=0.97, confidence=0.49)" });
-	assert.equal(uncertain.decision, "review");
-	assert.ok(request.systemPrompt.includes("confidence was insufficient"));
-	assert.ok(uncertain.reason.includes("confidence=0.49"));
+	const unchanged = await explain();
+	assert.equal(unchanged.decision, "review");
+	assert.ok(unchanged.reason.includes(review.reason));
 	for (const fallback of [
 		{ stopReason: "stop", content: [{ type: "text", text: " " }] },
 		{ stopReason: "error", content: [{ type: "text", text: "partial" }] },

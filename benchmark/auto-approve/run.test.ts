@@ -17,6 +17,9 @@ process.stdout.write = ((chunk: string | Uint8Array) => {
 }) as typeof process.stdout.write;
 let initialized = 0;
 let requests = 0;
+let confidence = 0.91;
+let unavailableChat = false;
+const availability: string[] = [];
 const model = { id: "offline", provider: "offline", api: "offline", reasoning: false,
 	input: ["text"], contextWindow: 1000, maxTokens: 100,
 	cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
@@ -26,14 +29,18 @@ ModelRuntime.create = async (options) => {
 	assert.equal(options?.modelsPath, null);
 	assert.equal(options?.refreshOnCreate, false);
 	assert.equal(options?.allowModelNetwork, false);
-	return { getPhysicalModel: (provider: string) => provider === "offline" ? model : undefined,
+	return { getAvailableOfType: async (kind: string, provider: string) => {
+			availability.push(`${kind}:${provider}`);
+			return unavailableChat && kind === "chat" ? [] : [{ id: provider === "offline" ? "offline" : provider === "typesafe" ? "jev-latest" : "typesafe/jev" }];
+		},
+		getPhysicalModel: (provider: string) => provider === "offline" ? model : undefined,
 		getModelOfType: (type: string, provider: string, id: string) =>
 			type === "classifier" && ["typesafe", "cloudflare-workers-ai"].includes(provider)
 				? { id, provider, api: "typesafe-system-one", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } : undefined,
 		classify: async () => {
 			requests++;
 			return { stopReason: "stop", model: "jev-latest",
-				answers: { verdict: { type: "choice", choice: "allow", probabilities: { allow: 0.97 }, confidence: 0.91 } },
+				answers: { verdict: { type: "choice", choice: "allow", probabilities: { allow: 0.97 }, confidence } },
 				usage: { input: 50, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 50,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 		},
@@ -104,7 +111,18 @@ try {
 
 	// Classifiers use the same evaluation policy across providers.
 	stdout = "";
-	const jevArgs = ["--provider", "typesafe", "--model", "jev-latest", "--log-dir", logDir, "--repetitions", "1", "--json"];
+	const fallbackArgs = ["--chat-provider", "offline", "--chat-model", "offline"];
+	const standalone = ["--provider", "typesafe", "--model", "jev-latest"];
+	await assert.rejects(main([...standalone, "--dry-run", "--type", "classifier"]), /require --chat-provider/);
+	await assert.rejects(main([...standalone, "--dry-run"]), /require --chat-provider/);
+	await assert.rejects(main([...standalone, "--dry-run", "--chat-provider", "unknown", "--chat-model", "unknown"]), /fallback chat/);
+	const jevArgs = [...standalone, ...fallbackArgs, "--log-dir", logDir, "--repetitions", "1", "--json"];
+	unavailableChat = true;
+	const beforeUnavailable = requests;
+	await assert.rejects(main(jevArgs), /execution failed/);
+	assert.equal(requests, beforeUnavailable);
+	assert.deepEqual(availability.slice(-2), ["classifier:typesafe", "chat:offline"]);
+	unavailableChat = false;
 	assert.equal(await main(jevArgs), 0);
 	const jevReport = JSON.parse(stdout);
 	assert.ok(isRunResult(jevReport));
@@ -118,7 +136,7 @@ try {
 	assert.equal(jevOutcome.estimatedCostUsd, 50 * 0.042 / 1e6);
 	stdout = "";
 	assert.equal(await main(["--provider", "cloudflare-workers-ai", "--model", "typesafe/jev", "--type", "classifier",
-		"--log-dir", logDir, "--repetitions", "1", "--json"]), 0);
+		...fallbackArgs, "--log-dir", logDir, "--repetitions", "1", "--json"]), 0);
 	const cloudflareReport = JSON.parse(stdout);
 	assert.ok(isRunResult(cloudflareReport));
 	assert.deepEqual(cloudflareReport.modelIdentity.pricing, jevReport.modelIdentity.pricing);
@@ -126,6 +144,24 @@ try {
 	assert.equal(cloudflareReport.usage.averageEstimatedCostUsd, 50 * 0.042 / 1e6);
 	assert.equal((cloudflareReport.modelIdentity as Record<string, unknown>).questionSchemaHash, jevIdentity.questionSchemaHash);
 	assert.deepEqual(cloudflareReport.outcomes[0].result, jevOutcome.result);
+	assert.equal(jevOutcome.routing?.fallbackUsed, false);
+	assert.equal(jevOutcome.routing?.classifierAttempt.usage?.input, 50);
+	assert.ok("hybrid" in jevReport.modelIdentity && jevReport.modelIdentity.hybrid);
+	assert.equal(jevReport.modelIdentity.hybrid.confidenceThreshold, 0.25);
+	assert.equal(jevReport.modelIdentity.hybrid.identity.catalogHash.length, 64);
+	confidence = 0.24;
+	stdout = "";
+	assert.equal(await main([...jevArgs, "--effort", "medium"]), 0);
+	const hybridReport = JSON.parse(stdout);
+	assert.ok(isRunResult(hybridReport));
+	const hybridOutcome = hybridReport.outcomes[0];
+	assert.equal(hybridOutcome.routing?.fallbackUsed, true);
+	assert.equal(hybridOutcome.routing?.chatAttempt?.usage?.input, 20);
+	assert.equal(hybridOutcome.usage?.input, 70);
+	assert.equal(hybridOutcome.usage?.output, 1);
+	assert.equal(hybridOutcome.estimatedCostUsd, 50 * 0.042 / 1e6 + 0.000044);
+	assert.ok("hybrid" in hybridReport.modelIdentity && hybridReport.modelIdentity.hybrid);
+	assert.equal(hybridReport.modelIdentity.hybrid.effort, "medium");
 } finally {
 	ModelRuntime.create = originalCreate;
 	process.stdout.write = originalWrite;

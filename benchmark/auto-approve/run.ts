@@ -5,7 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { evaluateSafetyJev, JEV_QUESTIONS } from "../../exts/auto-approve/jev-evaluator.ts";
+import { HYBRID_CONFIDENCE_THRESHOLD, evaluateSafetyHybrid } from "../../exts/auto-approve/hybrid-evaluator.ts";
+import { JEV_QUESTIONS } from "../../exts/auto-approve/jev-evaluator.ts";
 import { isRunResult, loadCases, RUN_RESULT_SCHEMA_VERSION, SUBSTITUTION_ID, type ModelIdentity, type RunResult } from "./contracts.ts";
 import { calculateAggregates, formatSummary, formatFullReport, summarizeLatency, summarizeUsage } from "./metrics.ts";
 import { instructionsFor, runEvaluations, type EvaluateFn } from "./runner.ts";
@@ -15,6 +16,7 @@ const hash = (value: string | Buffer) => createHash("sha256").update(value).dige
 
 export function cliOptions(args: string[]) {
 	const { values } = parseArgs({ args, options: {
+		"chat-provider": { type: "string" }, "chat-model": { type: "string" },
 		provider: { type: "string" }, model: { type: "string" }, type: { type: "string" }, effort: { type: "string", default: "low" },
 		"timeout-ms": { type: "string", default: "30000" }, repetitions: { type: "string", default: "3" },
 		cases: { type: "string", default: join(root, "benchmark/auto-approve/cases.jsonl") },
@@ -31,6 +33,8 @@ export function cliOptions(args: string[]) {
 	if (values.type !== undefined && values.type !== "chat" && values.type !== "classifier") {
 		throw new Error("--type must be chat or classifier");
 	}
+	if (!!values["chat-provider"]?.trim() !== !!values["chat-model"]?.trim()) throw new Error("--chat-provider and --chat-model must be supplied together");
+	if (values.type === "classifier" && !values["chat-provider"]?.trim()) throw new Error("Classifier runs require --chat-provider and --chat-model");
 	const effort: "low" | "medium" | "high" = values.effort;
 	const positive = (value: string, name: string) => {
 		const number = Number(value);
@@ -41,6 +45,7 @@ export function cliOptions(args: string[]) {
 	if (timeoutMs > 2_147_483_647) throw new Error("--timeout-ms exceeds Node's timer limit");
 	return {
 		help: false as const, provider: values.provider, model: values.model, type: values.type,
+		chatProvider: values["chat-provider"], chatModel: values["chat-model"],
 		effort, timeoutMs, repetitions: positive(values.repetitions!, "--repetitions"),
 		cases: resolve(values.cases!), output: values.output ? resolve(values.output) : undefined,
 		authPath: values["auth-path"], dryRun: values["dry-run"],
@@ -96,7 +101,8 @@ async function checkOutput(path: string): Promise<void> {
 
 const help = `Usage: npm run --silent benchmark:auto-approve -- --provider PROVIDER --model MODEL [options]
   --type chat|classifier    Default chat when present, otherwise classifier
-  --effort is inert for classifiers
+  --chat-provider PROVIDER --chat-model MODEL  Required classifier fallback
+  --effort applies to chat, including hybrid fallback
   --effort low|medium|high   Default low
   --timeout-ms INTEGER      Default 30000
   --repetitions INTEGER     Default 3
@@ -105,8 +111,18 @@ const help = `Usage: npm run --silent benchmark:auto-approve -- --provider PROVI
   --json                    JSON stdout instead of summary table
   --output PATH             Additional new JSON file
   --auth-path PATH          Pi credential-file override
-  --dry-run                 Validate/reconstruct without auth, requests, or availability checks
+  --dry-run                 Validate/reconstruct and check catalogs; no inference or availability checks
   --help`;
+
+function chatIdentity(chat: import("@earendil-works/pi-ai").Model<any>, versions: { piCodingAgentVersion: string; piAiVersion: string }) {
+	const selected = { api: chat.api, reasoning: chat.reasoning, input: chat.input,
+		contextWindow: chat.contextWindow, maxTokens: chat.maxTokens,
+		pricing: { input: chat.cost.input, output: chat.cost.output, cacheRead: chat.cost.cacheRead,
+			cacheWrite: chat.cost.cacheWrite, ...(chat.cost.tiers ? { tiers: chat.cost.tiers } : {}) } };
+	return { ...selected, ...versions, catalogHash: hash(JSON.stringify({ ...selected,
+		thinkingLevelMap: chat.thinkingLevelMap, samplingParams: chat.samplingParams,
+		samplingParamsByThinkingLevel: chat.samplingParamsByThinkingLevel })) };
+}
 
 export async function main(args: string[]): Promise<number> {
 	const options = cliOptions(args);
@@ -117,7 +133,7 @@ export async function main(args: string[]): Promise<number> {
 	const bytes = await readFile(options.cases);
 	const cases = loadCases(bytes.toString("utf8"));
 	const planned = cases.length * options.repetitions;
-	if (!Number.isSafeInteger(planned)) throw new Error("Planned request count exceeds safe integer range");
+	if (!Number.isSafeInteger(planned)) throw new Error("Planned evaluation count exceeds safe integer range");
 	cases.forEach(instructionsFor);
 	if (options.output) await checkOutput(options.output);
 	const datasetIdentity = { caseIds: cases.map((value) => value.id), count: cases.length, contentHash: hash(bytes) };
@@ -125,14 +141,27 @@ export async function main(args: string[]): Promise<number> {
 		extensionVersion: JSON.parse(await readFile(join(root, "package.json"), "utf8")).version as string,
 		sourcesHash: await sourceHash(root), substitution: SUBSTITUTION_ID,
 	};
+	const runtime = await ModelRuntime.create({ modelsPath: null, authPath: options.authPath,
+		refreshOnCreate: false, allowModelNetwork: false }).catch(() => {
+		throw new Error("Benchmark model catalog initialization failed");
+	});
+	const primaryChat = options.type === "classifier" ? undefined : runtime.getPhysicalModel(options.provider, options.model);
+	const hybrid = options.type === "classifier" || (options.type !== "chat" && !primaryChat);
+	const classifier = hybrid ? runtime.getModelOfType("classifier", options.provider, options.model) : undefined;
+	if (hybrid && !classifier) throw new Error("Unknown built-in classifier model");
+	if (!hybrid && !primaryChat) throw new Error("Unknown built-in physical chat model");
+	if (hybrid && (!options.chatProvider?.trim() || !options.chatModel?.trim())) throw new Error("Classifier runs require --chat-provider and --chat-model");
+	const fallback = hybrid ? runtime.getPhysicalModel(options.chatProvider!, options.chatModel!) : undefined;
+	if (hybrid && !fallback) throw new Error("Unknown built-in fallback chat model");
 	if (options.dryRun) {
 		const preview = { dryRun: true, datasetIdentity, evaluatorPolicyIdentity,
-			provider: options.provider, model: options.model, type: options.type ?? null, effort: options.effort,
+			provider: options.provider, model: options.model, type: hybrid ? "classifier" : "chat", effort: options.effort,
+			chatProvider: options.chatProvider, chatModel: options.chatModel,
 			timeoutMs: options.timeoutMs, repetitions: options.repetitions, plannedRequests: planned };
 		const json = `${JSON.stringify(preview, null, 2)}\n`;
 		if (options.output) await writeFile(options.output, json, { flag: "wx", mode: 0o600 });
 		if (options.json) process.stdout.write(json);
-		else console.log(`Dry run: ${options.provider}/${options.model} (${options.effort})\n${cases.length} cases × ${options.repetitions} repetitions = ${planned} requests\nTimeout: ${options.timeoutMs}ms; reports: ${options.logDir}\nNo auth/network initialization or run logs written.`);
+		else console.log(`Dry run: ${options.provider}/${options.model} (${options.effort})\n${cases.length} cases × ${options.repetitions} repetitions = ${planned} evaluations${hybrid ? " (up to two model requests each)" : ""}\nTimeout: ${options.timeoutMs}ms; reports: ${options.logDir}\nNo inference requests or run logs written.`);
 		return 0;
 	}
 	await mkdir(options.logDir, { recursive: true, mode: 0o700 });
@@ -142,9 +171,11 @@ export async function main(args: string[]): Promise<number> {
 	process.on("SIGINT", interrupt);
 	process.on("SIGTERM", interrupt);
 	try {
-		const runtime = await ModelRuntime.create({ modelsPath: null, authPath: options.authPath,
-			refreshOnCreate: false, allowModelNetwork: false, signal: controller.signal });
 		controller.signal.throwIfAborted();
+		for (const [kind, selected] of hybrid ? [["classifier", classifier!], ["chat", fallback!]] as const : [["chat", primaryChat!]] as const) {
+			const available = await runtime.getAvailableOfType(kind, selected.provider, { signal: controller.signal });
+			if (!available.some((value) => value.id === selected.id)) throw new Error("Model unavailable");
+		}
 		const versions = {
 			piCodingAgentVersion: await packageVersion("@earendil-works/pi-coding-agent"),
 			piAiVersion: await packageVersion("@earendil-works/pi-ai"),
@@ -152,14 +183,14 @@ export async function main(args: string[]): Promise<number> {
 		let model: Parameters<typeof runEvaluations>[0]["model"];
 		let modelIdentity: ModelIdentity;
 		let evaluate: EvaluateFn | undefined;
-		const chat = options.type === "classifier" ? undefined : runtime.getPhysicalModel(options.provider, options.model);
-		if (options.type === "classifier" || (options.type !== "chat" && !chat)) {
-			const classifier = runtime.getModelOfType("classifier", options.provider, options.model);
-			if (!classifier) throw new Error("Unknown built-in classifier model");
+		const chat = primaryChat;
+		if (classifier && fallback) {
 			model = classifier;
 			modelIdentity = {
 				...versions, api: classifier.api,
 				questionSchemaHash: hash(JSON.stringify(JEV_QUESTIONS)),
+				hybrid: { confidenceThreshold: HYBRID_CONFIDENCE_THRESHOLD, provider: options.chatProvider!, model: options.chatModel!,
+					effort: options.effort, identity: chatIdentity(fallback, versions) },
 				// TypeSafe and Cloudflare Jev have unknown catalog pricing; use their published rate.
 				pricing: ((options.provider === "typesafe" && options.model === "jev-latest") ||
 					(options.provider === "cloudflare-workers-ai" && options.model === "typesafe/jev"))
@@ -167,27 +198,17 @@ export async function main(args: string[]): Promise<number> {
 					: { ...classifier.cost },
 			};
 			evaluate = (_model, ctx, toolName, input, config, instructions, guidance) =>
-				evaluateSafetyJev(classifier, { ...ctx, modelRegistry: runtime }, toolName, input, config, instructions, guidance);
+				evaluateSafetyHybrid(classifier, fallback, { ...ctx, modelRegistry: runtime }, toolName, input, config, instructions, guidance);
 		} else {
 			if (!chat) throw new Error("Unknown built-in physical chat model");
 			model = chat;
-			const selected = {
-				api: chat.api, reasoning: chat.reasoning, input: chat.input,
-				contextWindow: chat.contextWindow, maxTokens: chat.maxTokens,
-				pricing: { input: chat.cost.input, output: chat.cost.output,
-					cacheRead: chat.cost.cacheRead, cacheWrite: chat.cost.cacheWrite,
-					...(chat.cost.tiers ? { tiers: chat.cost.tiers } : {}) },
-			};
-			modelIdentity = { ...selected, catalogHash: hash(JSON.stringify({ ...selected,
-				thinkingLevelMap: chat.thinkingLevelMap, samplingParams: chat.samplingParams,
-				samplingParamsByThinkingLevel: chat.samplingParamsByThinkingLevel })),
-				...versions };
+			modelIdentity = chatIdentity(chat, versions);
 		}
 		const startedAt = Date.now();
 		console.error(`Running ${planned} evaluations (${cases.length} cases × ${options.repetitions} repetitions)…`);
 		const outcomes = await runEvaluations({ cases, model, modelRegistry: runtime,
 			effort: options.effort, timeoutMs: options.timeoutMs, repetitions: options.repetitions,
-			pricing: modelIdentity.pricing, signal: controller.signal, evaluate,
+			pricing: modelIdentity.pricing, chatPricing: fallback?.cost, signal: controller.signal, evaluate,
 		});
 		const report: RunResult = { schemaVersion: RUN_RESULT_SCHEMA_VERSION, datasetIdentity, evaluatorPolicyIdentity,
 			provider: options.provider, model: options.model, modelIdentity,

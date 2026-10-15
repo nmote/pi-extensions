@@ -135,6 +135,11 @@ export function summarizeLatency(outcomes: Outcome[]): RunResult["latency"] {
 	};
 }
 
+function fallbackSummary(outcomes: Outcome[]): string {
+	const count = outcomes.filter((outcome) => outcome.routing?.fallbackUsed).length;
+	return `${count}/${outcomes.length} (${outcomes.length ? (count / outcomes.length * 100).toFixed(1) : "n/a"}%)`;
+}
+
 function table(rows: string[][]): string {
 	const widths = rows[0].map((_, index) => Math.max(...rows.map((row) => row[index].length)));
 	const line = widths.map((width) => "─".repeat(width + 2)).join("┼");
@@ -146,6 +151,7 @@ function table(rows: string[][]): string {
 
 export function formatSummary(report: RunResult, cases: Case[]): string {
 	const { aggregates: a, usage: u, latency: l } = report;
+	const hybrid = "hybrid" in report.modelIdentity ? report.modelIdentity.hybrid : undefined;
 	const percent = (value: number | null) => value === null ? "n/a" : `${(100 * value).toFixed(1)}%`;
 	const money = (value: number | null) => value === null ? "unknown" : `$${value.toFixed(6)}`;
 	const score = (name: string, metrics: VerdictMetrics) => [name, percent(metrics.precision),
@@ -160,6 +166,9 @@ export function formatSummary(report: RunResult, cases: Case[]): string {
 			["Repetitions", String(report.repetitions)],
 			["Valid / planned", `${a.valid} / ${a.planned} (${percent(a.completionRate)})`],
 			["Failed", String(a.failed)],
+			["Chat fallbacks", fallbackSummary(report.outcomes)],
+			...(hybrid ? [["Fallback model", `${hybrid.provider}/${hybrid.model} (${hybrid.effort})`],
+				["Routing cutoff", `confidence < ${hybrid.confidenceThreshold}`]] : []),
 			["TP / FP / TN / FN", `${a.tp} / ${a.fp} / ${a.tn} / ${a.fn}`],
 			["Consistency", `${a.consistency.unanimous} unanimous, ${a.consistency.mixed} mixed, ${a.consistency.insufficient} insufficient`],
 			["Latency mean / range", `${l.averageMs?.toFixed(1) ?? "n/a"} / ${l.minMs?.toFixed(1) ?? "n/a"}–${l.maxMs?.toFixed(1) ?? "n/a"} ms`],
@@ -179,6 +188,7 @@ export function formatSummary(report: RunResult, cases: Case[]): string {
 
 export function formatFullReport(report: RunResult, cases: Case[]): string {
 	const { aggregates: a, usage: u, latency: l } = report;
+	const hybrid = "hybrid" in report.modelIdentity ? report.modelIdentity.hybrid : undefined;
 	const percentage = (value: number | null) => value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
 	const money = (value: number | null) => value === null ? "unknown" : `$${value.toFixed(6)}`;
 	const metrics = (m: VerdictMetrics) => `TP/FP/TN/FN ${m.tp}/${m.fp}/${m.tn}/${m.fn}; precision ${percentage(m.precision)}, recall ${percentage(m.recall)}, F2 ${percentage(m.f2)}, safe-case allow ${percentage(m.safeCaseAllowRate)}`;
@@ -199,6 +209,8 @@ export function formatFullReport(report: RunResult, cases: Case[]): string {
 		`Review-positive: ${metrics(a)}`,
 		`Baseline always-review: ${metrics(a.baselines.alwaysReview)}`,
 		`Baseline always-allow: ${metrics(a.baselines.alwaysAllow)}`,
+		`Chat fallbacks: ${fallbackSummary(report.outcomes)}`,
+		...(hybrid ? [`Fallback model: ${hybrid.provider}/${hybrid.model} (${hybrid.effort}); confidence < ${hybrid.confidenceThreshold}`] : []),
 		`Failures: ${Object.entries(failureCounts).map(([kind, count]) => `${kind} ${count}`).join(", ")}`,
 		`Estimated cost ${money(u.totalEstimatedCostUsd)}; known subtotal ${money(u.knownCostSubtotalUsd)} (${u.pricedAttempts}/${a.attempted} priced); known-cost average ${money(u.averageEstimatedCostUsd)}; ${u.usageAttempts} with usage`,
 		`Attempt latency: mean ${l.averageMs === null ? "n/a" : `${l.averageMs.toFixed(1)}ms`}, min ${l.minMs === null ? "n/a" : `${l.minMs.toFixed(1)}ms`}, max ${l.maxMs === null ? "n/a" : `${l.maxMs.toFixed(1)}ms`}`,

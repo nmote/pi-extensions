@@ -32,7 +32,7 @@ export function tokenUsage(result: EvaluationResult): TokenUsage | null {
 	return Object.values(tokens).some((value) => value !== null && value > 0) ? tokens : null;
 }
 
-/** Injectable evaluator; run.ts supplies a Jev closure for classifier runs. */
+/** Injectable evaluator; classifier runs use production hybrid orchestration. */
 export type EvaluateFn = (
 	model: Model<any> | ClassifierModel<ClassifierApi>,
 	ctx: EvaluatorContext,
@@ -51,6 +51,7 @@ export interface RunOptions {
 	timeoutMs: number;
 	repetitions: number;
 	pricing: ModelIdentity["pricing"];
+	chatPricing?: ModelIdentity["pricing"];
 	signal?: AbortSignal;
 	evaluate?: EvaluateFn;
 	onProgress?: (caseId: string, repetition: number) => void;
@@ -73,13 +74,29 @@ export async function runEvaluations(options: RunOptions): Promise<Outcome[]> {
 				backend: "chat", jev: { provider: "typesafe", model: "jev-latest" },
 			}, instructions[index], value.sessionGuidance);
 			options.signal?.throwIfAborted();
-			const usage = tokenUsage(result);
+			const routing = result.routing;
+			const classifierUsage = routing ? tokenUsage({ ...result, attempt: routing.classifierAttempt }) : null;
+			const chatUsage = routing?.chatAttempt ? tokenUsage({ ...result, attempt: routing.chatAttempt }) : null;
+			const usage = routing ? (routing.fallbackUsed ? combineUsage(classifierUsage, chatUsage) : classifierUsage) : tokenUsage(result);
+			const classifierCost = estimateCostUsd(classifierUsage, options.pricing);
+			const chatCost = options.chatPricing ? estimateCostUsd(chatUsage, options.chatPricing) : null;
+			const cost = routing ? (routing.fallbackUsed
+				? (classifierCost === null || chatCost === null ? null : classifierCost + chatCost)
+				: classifierCost) : estimateCostUsd(usage, options.pricing);
+			const attempt = (value: NonNullable<EvaluationResult["attempt"]>) => ({
+				...(value.failure ? { failure: value.failure } : {}), stopReason: value.stopReason ?? null,
+				usage: tokenUsage({ ...result, attempt: value }), responseModel: value.responseModel ?? null,
+				providerThinkingLevel: value.providerThinkingLevel ?? null,
+			});
 			const failure = result.attempt?.failure;
 			if (failure === "cancelled") throw new Error("benchmark cancelled");
 			outcomes.push({
 				caseId: value.id, repetition,
 				elapsedMs: performance.now() - start,
-				usage, estimatedCostUsd: estimateCostUsd(usage, options.pricing),
+				usage, estimatedCostUsd: cost,
+				...(result.classification ? { classification: result.classification } : {}),
+				...(routing ? { routing: { ...routing, classifierAttempt: attempt(routing.classifierAttempt),
+					...(routing.chatAttempt ? { chatAttempt: attempt(routing.chatAttempt) } : {}) } } : {}),
 				responseModel: result.attempt?.responseModel ?? null,
 				providerThinkingLevel: result.attempt?.providerThinkingLevel ?? null,
 				stopReason: result.attempt?.stopReason ?? null,
@@ -90,6 +107,15 @@ export async function runEvaluations(options: RunOptions): Promise<Outcome[]> {
 		}
 	}
 	return outcomes;
+}
+
+function combineUsage(a: TokenUsage | null, b: TokenUsage | null): TokenUsage | null {
+	if (!a || !b) return null;
+	const combined = { ...a };
+	for (const key of Object.keys(a) as (keyof TokenUsage)[]) {
+		combined[key] = a[key] === null || b[key] === null ? null : a[key]! + b[key]!;
+	}
+	return combined;
 }
 
 // Provider errors can contain credentials or request bodies; report typed categories only.

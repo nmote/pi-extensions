@@ -37,6 +37,16 @@ export interface EvaluatorContext {
 export interface EvaluationResult {
 	/** Request metadata only; never contains prompt or response bodies. */
 	attempt?: EvaluationAttempt;
+	classification?: { choice: Verdict; confidence: number };
+	routing?: {
+		classifierModel: { provider: string; id: string };
+		chatModel: { provider: string; id: string };
+		classifierChoice: Verdict | null;
+		confidence: number | null;
+		fallbackUsed: boolean;
+		classifierAttempt: EvaluationAttempt;
+		chatAttempt?: EvaluationAttempt;
+	};
 	decision: Verdict;
 	reason: string;
 	/** False for synthetic fallback results caused by evaluator failure. */

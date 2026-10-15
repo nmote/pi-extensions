@@ -1,6 +1,6 @@
 import type { ClassifierContext, ClassifierModel, ClassifierResult } from "@earendil-works/pi-ai";
 import type { EvaluatorConfig } from "./config.ts";
-import { evaluateSafetyJev, JEV_CONFIDENCE_THRESHOLD, JEV_QUESTIONS, type JevEvaluatorContext } from "./jev-evaluator.ts";
+import { evaluateSafetyJev, JEV_QUESTIONS, type JevEvaluatorContext } from "./jev-evaluator.ts";
 import { buildSystemPrompt } from "./evaluator.ts";
 import { ALLOW_GUIDANCE, CAUTION_GUIDANCE, COMPOUND_GUIDANCE, REVIEW_GUIDANCE, SCOPE_GUIDANCE, SESSION_GUIDANCE } from "./evaluator-policy.ts";
 
@@ -49,10 +49,13 @@ async function main(): Promise<void> {
 	check("records attempt metadata", allow.attempt?.stopReason === "stop" && allow.attempt.responseModel === "jev-latest" &&
 		allow.attempt.usage?.input === 100 && allow.attempt.providerThinkingLevel === null);
 
-	const boundary = await evaluateSafetyJev(model, context(choiceAnswer("allow", JEV_CONFIDENCE_THRESHOLD)), "bash", { command: "git status" }, config);
-	check("allows at the confidence threshold", boundary.decision === "allow");
-	const below = await evaluateSafetyJev(model, context(choiceAnswer("allow", JEV_CONFIDENCE_THRESHOLD - 0.01)), "bash", { command: "git status" }, config);
-	check("reviews below the confidence threshold", below.decision === "review" && below.cacheable !== false);
+	const uncertain = await evaluateSafetyJev(model, context(choiceAnswer("allow", 0)), "bash", { command: "git status" }, config);
+	check("preserves raw choice and confidence for hybrid routing", uncertain.decision === "allow" &&
+		uncertain.classification?.choice === "allow" && uncertain.classification.confidence === 0);
+	for (const confidence of [NaN, -0.01, 1.01]) {
+		const invalid = await evaluateSafetyJev(model, context(choiceAnswer("allow", confidence)), "bash", { command: "git status" }, config);
+		check("invalid classifier confidence fails closed", invalid.decision === "review" && invalid.cacheable === false && !invalid.classification);
+	}
 
 	const review = await evaluateSafetyJev(model, context(choiceAnswer("review", 0.99)), "bash", { command: "rm -rf /" }, config);
 	check("accepts a review verdict as cacheable", review.decision === "review" && review.cacheable !== false &&

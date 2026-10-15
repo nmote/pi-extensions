@@ -871,6 +871,61 @@ async function main(): Promise<void> {
 		const switched = await gate({ toolName: "bash", input: { command: "switch-provider-in-flight" } }, workersCtx);
 		check("provider changes discard in-flight allows and retry with the selected provider",
 			switched?.block === true && JSON.stringify(classifierModels.slice(beforeSwitch)) === JSON.stringify(["cloudflare-workers-ai/typesafe/jev", "typesafe/jev-latest"]));
+
+		let hybridCalls = 0;
+		const hybridCtx = { ...workersCtx, modelRegistry: {
+			...workersCtx.modelRegistry,
+			getAvailable: () => [{ provider: "test", id: "small" }, { provider: "test", id: "alternate" }],
+			classify: async () => {
+				hybridCalls++;
+				return { stopReason: "stop", answers: { verdict: {
+					type: "choice", choice: "review", probabilities: { review: 0.55 }, confidence: 0.1,
+				} } };
+			},
+		} };
+		evaluatorResponse = allowResponse;
+		const beforeHybridChat = evaluatorRequests.length;
+		const lowReview = await gate({ toolName: "bash", input: { command: "hybrid-low-review" } }, hybridCtx);
+		check("low-confidence review uses the chat verdict without an explanation call",
+			lowReview === undefined && hybridCalls === 1 && evaluatorRequests.length === beforeHybridChat + 1);
+		const hybridLog = JSON.parse(readFileSync(logFile, "utf8").trim().split("\n").at(-1)!);
+		check("hybrid logs record both models and routing",
+			isEvalLogRecord(hybridLog) && hybridLog.routing?.fallbackUsed === true &&
+			hybridLog.routing?.classifierChoice === "review" && hybridLog.routing?.confidence === 0.1 &&
+			hybridLog.routing?.chatModel.id === "small" && hybridLog.model.model === "small");
+		await gate({ toolName: "bash", input: { command: "hybrid-low-review" } }, hybridCtx);
+		check("hybrid cache reuses the final verdict", hybridCalls === 1 && evaluatorRequests.length === beforeHybridChat + 1);
+
+		const noChatCtx = { ...hybridCtx, hasUI: false, modelRegistry: { ...hybridCtx.modelRegistry, getAvailable: () => [] } };
+		const noChat = await gate({ toolName: "bash", input: { command: "hybrid-low-review" } }, noChatCtx);
+		check("saved Jev mode requires chat authentication even for a cached verdict",
+			noChat?.block === true && noChat.reason.includes("requires an authenticated chat model") && hybridCalls === 1);
+		authenticated = ["cloudflare-workers-ai"];
+		const beforeMissingChat = readFileSync(configFile, "utf8");
+		await commands.get("auto").handler("evaluator jev", noChatCtx);
+		check("headless Jev selection without chat preserves configuration", readFileSync(configFile, "utf8") === beforeMissingChat);
+		authenticated = ["typesafe", "cloudflare-workers-ai"];
+
+		const smallModelFile = join(temp, "extensions", "small-model.json");
+		writeFileSync(smallModelFile, JSON.stringify({ provider: "test", model: "alternate" }));
+		await gate({ toolName: "bash", input: { command: "hybrid-low-review" } }, hybridCtx);
+		check("changing the fallback model invalidates hybrid cache", hybridCalls === 2);
+		let changeFallback = true;
+		onEvaluate = () => {
+			if (!changeFallback) return;
+			changeFallback = false;
+			writeFileSync(smallModelFile, JSON.stringify({ provider: "test", model: "small" }));
+		};
+		await gate({ toolName: "bash", input: { command: "hybrid-change-fallback" } }, hybridCtx);
+		onEvaluate = undefined;
+		check("changing the fallback model discards an in-flight verdict and reevaluates", hybridCalls === 4);
+		const racyCtx = { ...hybridCtx, modelRegistry: { ...hybridCtx.modelRegistry, getAvailable: () => {
+			writeFileSync(smallModelFile, JSON.stringify({ provider: "test", model: "alternate" }));
+			return [{ provider: "test", id: "small" }];
+		} } };
+		const mismatched = await gate({ toolName: "bash", input: { command: "hybrid-change-fallback" } }, racyCtx);
+		check("resolved and saved fallback identities must agree before cache reuse",
+			mismatched?.block === true && mismatched.reason.includes("selection changed or could not be saved") && hybridCalls === 4);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

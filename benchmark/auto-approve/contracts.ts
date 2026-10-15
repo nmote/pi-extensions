@@ -297,6 +297,10 @@ export const classifierModelIdentitySchema = Type.Object(
 		...versionFields,
 		/** Hash of the static question schema sent to the classifier. */
 		questionSchemaHash: Type.String({ minLength: 1 }),
+		hybrid: Type.Optional(Type.Object({
+			confidenceThreshold: Type.Number({ minimum: 0, maximum: 1 }), provider: Type.String({ minLength: 1 }), model: Type.String({ minLength: 1 }),
+			effort: effortSchema, identity: chatModelIdentitySchema,
+		}, { additionalProperties: false })),
 		pricing: pricingSchema,
 	},
 	{ additionalProperties: false },
@@ -314,12 +318,27 @@ export const failureKindSchema = Type.Union([
 ]);
 export type FailureKind = Static<typeof failureKindSchema>;
 
+const attemptSchema = Type.Object({
+	failure: Type.Optional(Type.Union([failureKindSchema, Type.Literal("cancelled")])),
+	stopReason: nullableString, usage: Type.Union([tokenUsageSchema, Type.Null()]),
+	responseModel: nullableString, providerThinkingLevel: nullableString,
+}, { additionalProperties: false });
+
 /** One case × one repetition. */
 export const outcomeSchema = Type.Object(
 	{
 		caseId: Type.String({ minLength: 1 }),
 		repetition: Type.Integer({ minimum: 1 }),
 		elapsedMs: count,
+		classification: Type.Optional(Type.Object({ choice: verdictSchema, confidence: Type.Number({ minimum: 0, maximum: 1 }) }, { additionalProperties: false })),
+		routing: Type.Optional(Type.Object({
+			classifierChoice: Type.Union([verdictSchema, Type.Null()]), confidence: rate,
+			fallbackUsed: Type.Boolean(),
+			classifierModel: Type.Optional(Type.Object({ provider: Type.String(), id: Type.String() }, { additionalProperties: false })),
+			chatModel: Type.Optional(Type.Object({ provider: Type.String(), id: Type.String() }, { additionalProperties: false })),
+			classifierAttempt: attemptSchema,
+			chatAttempt: Type.Optional(attemptSchema),
+		}, { additionalProperties: false })),
 		usage: Type.Union([tokenUsageSchema, Type.Null()]),
 		estimatedCostUsd: nullableCount,
 		responseModel: nullableString,

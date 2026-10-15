@@ -22,21 +22,24 @@ exposed by the installed extension package.
 ## Running
 
 ```sh
-# Validate cases and reconstruct current instructions without auth or requests.
-npm run --silent benchmark:auto-approve -- --provider anthropic --model claude-haiku-4-5 --dry-run
+# Validate cases, catalog models, and instructions without inference.
+npm run --silent benchmark:auto-approve -- --provider anthropic --model claude-haiku-5-5 --dry-run
 
 # Billable: run only when ready to contact the selected provider.
-npm run --silent benchmark:auto-approve -- --provider anthropic --model claude-haiku-4-5
+npm run --silent benchmark:auto-approve -- --provider anthropic --model claude-haiku-5-5
 
-# The TypeSafe System One classifier (Jev) is a separate backend; --effort is inert.
-npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-latest --dry-run
-npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-latest
+# Jev always uses explicit chat fallback; --effort controls that chat model.
+npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-latest --chat-provider anthropic --chat-model claude-haiku-5-5 --effort medium --dry-run
+npm run --silent benchmark:auto-approve -- --provider typesafe --model jev-latest --chat-provider anthropic --chat-model claude-haiku-5-5 --effort medium
 ```
 
-Classifier models from any built-in provider evaluate each case with one
-structured `classify()` call; an `allow` verdict requires
-confidence ≥ 0.5. Jev returns no prose, so outcome reasons are synthesized
-from the choice probabilities. TypeSafe `jev-latest` and Cloudflare
+Classifier runs use production `evaluateSafetyHybrid`: Jev's choice decides
+at confidence ≥ 0.25 in either direction; lower confidence invokes chat.
+Failures fail closed, without fallback or retries. Both models are required
+and preflighted; dry-run checks their catalog identities, not credentials.
+There is no standalone classifier mode, including `--type classifier`.
+Optional denial explanations are excluded: this benchmark measures decisions.
+Jev returns no prose, so direct-choice reasons use its probabilities. TypeSafe `jev-latest` and Cloudflare
 `typesafe/jev` use their published rate ($0.042 per million input tokens;
 output is free); other bindings use catalog pricing, with all-zero prices
 treated as unknown.
@@ -72,7 +75,7 @@ nonpublic cases or rationales.
 ### Evaluator matrix
 
 ```sh
-# Offline validation and planned request counts; no auth or logs.
+# Offline catalog validation and planned evaluation counts; no inference or logs.
 npm run --silent benchmark:auto-approve:matrix -- --dry-run
 
 # Preview provider selection using local auth, without inference or logs.
@@ -89,9 +92,10 @@ exact provider/model candidates:
 - `deepseek`: Fireworks V4.1 Flash, then Cloudflare V4 Flash 0731
 - `haiku`: Anthropic `claude-haiku-5-5`
 - `glm`: Fireworks, then Cloudflare GLM 5.3 Flash
-- `jev`: TypeSafe `jev-latest`, then Cloudflare `typesafe/jev`
+- `jev-haiku`: TypeSafe `jev-latest`, then Cloudflare `typesafe/jev`, with the resolved `haiku` chat model
+- `jev-deepseek`: the same Jev candidates, with the resolved `deepseek` chat model
 
-Chat rows use medium effort; Jev uses inert low effort. DeepSeek's two versions
+All rows use medium chat effort. DeepSeek's two versions
 are intentional alternatives. Selection uses the first exact candidate with
 locally configured authentication and the correct model type. It is fixed
 before execution; request failures never trigger provider fallback. Authentication
@@ -102,18 +106,20 @@ Use `--bindings PATH` for machine-local overrides, without changing the matrix:
 ```json
 {
   "luna": { "provider": "openai-codex", "model": "gpt-6-luna" },
-  "jev": { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
+  "jev-haiku": { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
 }
 ```
 
 Unspecified IDs use automatic selection. Unknown IDs, malformed bindings, and
 unavailable explicit bindings fail before inference; explicit bindings never
-fall back. Binding files contain model identities, not credentials.
+fall back. Chat-row overrides also select the linked hybrid fallback.
+A hybrid row is unavailable when either component is unavailable.
+Binding files contain model identities, not credentials.
 
 The command accepts shared `--cases`, `--repetitions`, `--timeout-ms`,
 `--auth-path`, and `--log-dir` options with the single-run defaults.
 Dry-run validates the matrix/bindings and reconstructs inputs through the
-single-run command; it initializes no auth and leaves providers unresolved.
+single-run command; it checks catalog candidates and leaves authenticated provider selection unresolved.
 `--resolve-only` checks local availability without inference or logs; it cannot
 be combined with `--dry-run`.
 
@@ -122,7 +128,7 @@ or network catalog refresh. Unavailable automatic rows and failed runs do not
 prevent later entries from running. Stdout shows only evaluator labels, review-positive
 precision, recall, F2, unanimous/mixed/insufficient consistency counts,
 average estimated cost per evaluation in USD, the full estimated run cost in
-USD, and average latency in milliseconds. A final row totals the run costs; a
+USD, average latency in milliseconds, and chat fallback count/rate. A final row totals the run costs; a
 trailing `+` marks a partial total when some entries have unknown cost.
 Latency includes request/auth time for valid and failed attempts.
 Cost uses the report's average over attempts with known cost, including failures;
@@ -158,8 +164,8 @@ exposure. Credential-file overrides do not disable ambient credentials.
 
 Expired OAuth credentials refresh at request time and may update the normal
 auth file. Stored API-key commands may execute under Pi's auth rules; this is
-separate from benchmark tool calls, which never execute. Dry-run initializes
-neither auth nor requests and does not verify provider/model availability.
+separate from benchmark tool calls, which never execute. Dry-run creates the
+local runtime for catalog lookup but makes no inference or availability requests.
 Offline tests verify OAuth refresh and persistence at the injected credential
 store boundary, not through a live login or real credential-file write.
 
@@ -271,7 +277,11 @@ identifies replay with both fictional installation and bundled preset roots.
 Model identity records installed Pi versions, selected capabilities, catalog
 pricing, and a hash of selected
 metadata including thinking/sampling defaults. Classifier runs instead record
-the API, a hash of the static question schema, and selected-provider pricing. Requested effort is not proof
+the API, a hash of the static question schema, selected-provider pricing, and
+hybrid cutoff plus fallback provider/model/catalog identity and chat effort.
+Optional additive `classification` and `routing` outcome fields preserve Jev's
+choice/confidence, fallback selection, and both stages' sanitized attempt metadata.
+Version-2 reports without those fields remain readable. Requested effort is not proof
 of effective effort; reported provider effort/response model remain null when
 unavailable.
 
@@ -289,7 +299,9 @@ Latency includes request/auth time for valid and failed attempts. Usage from
 failed attempts counts when available; all-zero SDK usage is treated as
 unknown because it can be default-initialized. Token totals are null if any
 attempt lacks a component. Reasoning tokens are included in output, not added
-again.
+again. Hybrid latency spans both stages; usage sums both attempted stages.
+Each stage uses its own rate card, including input-tier selection. A missing
+stage's usage or cost keeps the combined value unknown.
 
 Costs are USD catalog estimates, not provider billing or subscription charges.
 Rates are per million tokens, with the highest applicable input-token pricing
