@@ -872,6 +872,8 @@ async function main(): Promise<void> {
 		check("provider changes discard in-flight allows and retry with the selected provider",
 			switched?.block === true && JSON.stringify(classifierModels.slice(beforeSwitch)) === JSON.stringify(["cloudflare-workers-ai/typesafe/jev", "typesafe/jev-latest"]));
 
+		await commands.get("auto").handler("stats", workersCtx);
+		check("chat evaluations and Jev explanations do not count as fallbacks", notices.at(-1)?.includes("Jev chat fallbacks: 0") === true);
 		let hybridCalls = 0;
 		const hybridCtx = { ...workersCtx, modelRegistry: {
 			...workersCtx.modelRegistry,
@@ -895,6 +897,14 @@ async function main(): Promise<void> {
 			hybridLog.routing?.chatModel.id === "small" && hybridLog.model.model === "small");
 		await gate({ toolName: "bash", input: { command: "hybrid-low-review" } }, hybridCtx);
 		check("hybrid cache reuses the final verdict", hybridCalls === 1 && evaluatorRequests.length === beforeHybridChat + 1);
+		await commands.get("auto").handler("stats", hybridCtx);
+		check("fallback stats exclude cache hits", notices.at(-1)?.includes("Jev chat fallbacks: 1") === true);
+		const fallbackSnapshot = entries.filter((entry) => entry.customType === "auto-approve-stats").at(-1)!;
+		resumedEntries = [{ type: "custom", ...fallbackSnapshot }];
+		await handlers.get("session_start")?.[0]?.({}, hybridCtx);
+		await commands.get("auto").handler("stats", hybridCtx);
+		check("fallback stats survive session resume", notices.at(-1)?.includes("Jev chat fallbacks: 1") === true);
+		resumedEntries = undefined;
 
 		const noChatCtx = { ...hybridCtx, hasUI: false, modelRegistry: { ...hybridCtx.modelRegistry, getAvailable: () => [] } };
 		const noChat = await gate({ toolName: "bash", input: { command: "hybrid-low-review" } }, noChatCtx);
@@ -926,6 +936,13 @@ async function main(): Promise<void> {
 		const mismatched = await gate({ toolName: "bash", input: { command: "hybrid-change-fallback" } }, racyCtx);
 		check("resolved and saved fallback identities must agree before cache reuse",
 			mismatched?.block === true && mismatched.reason.includes("selection changed or could not be saved") && hybridCalls === 4);
+		const { jevChatFallbacks: _fallbacks, ...legacyStats } = fallbackSnapshot.data as Record<string, number>;
+		resumedEntries = [{ type: "custom", customType: "auto-approve-stats", data: legacyStats }];
+		await handlers.get("session_start")?.[0]?.({}, ctx);
+		await commands.get("auto").handler("stats", ctx);
+		check("legacy stats preserve counters and default fallbacks to zero",
+			notices.at(-1)?.includes(`evaluator allows: ${legacyStats.evaluatorAllows}`) === true &&
+			notices.at(-1)?.includes("Jev chat fallbacks: 0") === true);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

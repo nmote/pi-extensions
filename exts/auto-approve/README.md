@@ -9,7 +9,7 @@ Controls tool permissions using explicit rules, human approval, or a background-
   - `/auto guidance [clear]` — View/edit session evaluator guidance, or clear it.
   - `/auto effort [low|medium|high]` — Pick or set evaluator reasoning effort (`evaluator.reasoningEffort` in configuration; applies to chat, including Jev fallback).
   - `/auto evaluator [chat|jev]` — Pick or set the evaluator backend (`evaluator.backend` in configuration). Jev then offers authenticated TypeSafe and Workers AI providers, skipping the provider picker when only one is available. Cancellation preserves settings.
-  - `/auto stats` — Show evaluation and human-approval counters.
+  - `/auto stats` — Show evaluation, Jev chat-fallback, and human-approval counters.
   - `/auto test <bash command>` or `/auto test <tool> <json object>` — Ask the evaluator for a verdict without executing the call.
 
 Ctrl+Alt+A cycles modes; `--auto` overrides the startup mode.

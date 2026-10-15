@@ -20,6 +20,7 @@ export const AUTO_APPROVE_STAT_NAMES = [
 	"evaluatorAllows",
 	"softRejections",
 	"evaluatorFailures",
+	"jevChatFallbacks",
 	"escalations",
 	"humanApprovals",
 	"humanDenials",

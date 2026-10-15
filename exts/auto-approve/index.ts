@@ -115,6 +115,7 @@ function emptyStats(): Stats {
 		evaluatorAllows: 0,
 		softRejections: 0,
 		evaluatorFailures: 0,
+		jevChatFallbacks: 0,
 		escalations: 0,
 		humanApprovals: 0,
 		humanDenials: 0,
@@ -126,6 +127,7 @@ function restoredStats(value: unknown): Stats | undefined {
 	const candidate = value as Partial<Record<AutoApproveStat, unknown>>;
 	const result = emptyStats();
 	for (const key of Object.keys(result) as AutoApproveStat[]) {
+		if (key === "jevChatFallbacks" && candidate[key] === undefined) continue;
 		if (typeof candidate[key] !== "number" || candidate[key] < 0 || !Number.isInteger(candidate[key])) return undefined;
 		result[key] = candidate[key];
 	}
@@ -362,6 +364,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				return undefined;
 			}
 			const result = await evaluateSafetyHybrid(classifier, chat, ctx, toolName, rawInput, config.evaluator, instructions, policy);
+			if (result.routing?.fallbackUsed) record("jevChatFallbacks", ctx);
 			return {
 				model: result.routing?.fallbackUsed ? chat : { provider: classifier.provider, id: classifier.id },
 				result: result.routing?.fallbackUsed ? result
@@ -903,7 +906,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 
 			if (trimmed === "stats") {
 				ctx.ui.notify(
-					`Auto-approve stats\n  evaluator allows: ${stats.evaluatorAllows}\n  soft rejections: ${stats.softRejections}\n  evaluator failures: ${stats.evaluatorFailures}\n  escalations: ${stats.escalations}\n  human approvals: ${stats.humanApprovals}\n  human denials: ${stats.humanDenials}`,
+					`Auto-approve stats\n  evaluator allows: ${stats.evaluatorAllows}\n  soft rejections: ${stats.softRejections}\n  evaluator failures: ${stats.evaluatorFailures}\n  Jev chat fallbacks: ${stats.jevChatFallbacks}\n  escalations: ${stats.escalations}\n  human approvals: ${stats.humanApprovals}\n  human denials: ${stats.humanDenials}`,
 					"info",
 				);
 				return;
