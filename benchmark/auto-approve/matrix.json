@@ -21,5 +21,9 @@
   { "id": "jev-deepseek", "kind": "classifier", "effort": "medium", "chat": "deepseek", "candidates": [
     { "provider": "typesafe", "model": "jev-latest" },
     { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
+  ] },
+  { "id": "jev-glm", "kind": "classifier", "effort": "medium", "chat": "glm", "candidates": [
+    { "provider": "typesafe", "model": "jev-latest" },
+    { "provider": "cloudflare-workers-ai", "model": "typesafe/jev" }
   ] }
 ]

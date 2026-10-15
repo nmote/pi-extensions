@@ -94,6 +94,7 @@ exact provider/model candidates:
 - `glm`: Fireworks, then Cloudflare GLM 5.3 Flash
 - `jev-haiku`: TypeSafe `jev-latest`, then Cloudflare `typesafe/jev`, with the resolved `haiku` chat model
 - `jev-deepseek`: the same Jev candidates, with the resolved `deepseek` chat model
+- `jev-glm`: the same Jev candidates, with the resolved `glm` chat model
 
 All rows use medium chat effort. DeepSeek's two versions
 are intentional alternatives. Selection uses the first exact candidate with
