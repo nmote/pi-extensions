@@ -15,8 +15,9 @@ dataset — it is not an exact historical replay. Shared contracts live in
 Use the repo-local [curation skill](../../.agents/skills/auto-approve-curation/SKILL.md)
 with `/skill:auto-approve-curation` from this checkout. Its helper batches private
 logs, applies explicit fictionalization mappings, and tracks dispositions in
-`<log-dir>/curation-state.json` without editing source logs. State writes need
-permission; public case additions require individual approval. The skill is not
+`<log-dir>/curation-state.json` without editing source logs. Invoking the skill
+authorizes progress-state writes to that file and its lock; public case
+additions still require individual approval of each fully shown case. The skill is not
 exposed by the installed extension package.
 
 ## Running

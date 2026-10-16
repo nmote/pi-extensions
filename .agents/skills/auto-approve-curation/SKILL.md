@@ -23,9 +23,14 @@ for the curator. Never execute calls, upload logs, or write raw intermediate
 records into the checkout. Do not enable logging, edit configuration or delete
 logs. Only sanitized proposals belong in consultation output.
 
-Read access does not authorize outside-checkout writes. Obtain permission for
-progress-state writes beside the selected logs unless the current approved
-plan already grants it. Dataset additions require explicit approval of each
+Read access does not authorize outside-checkout writes. Invoking this skill
+explicitly authorizes helper-managed writes to `curation-state.json` and its
+`curation-state.json.lock` beside the selected logs (the default
+`<agent-dir>/auto-approve-logs` or the `--log-dir` directory) for progress
+tracking via `scripts/cli.ts` `mark`/`reset`. That authorization is limited to
+that progress state; raw logs stay untouched, manual stale-lock removal still
+requires separate permission and verification, and all other outside-checkout
+writes remain unauthorized. Dataset additions require explicit approval of each
 fully shown case; neither skill invocation nor plan approval grants that.
 Commits require separate authorization.
 
@@ -125,7 +130,8 @@ truncation without trusting old line offsets.
 
 ## Progress beside the logs
 
-With authorized state writes, record explicit dispositions:
+Invoking this skill authorizes these progress-state writes; record explicit
+dispositions:
 
 ```sh
 node --import tsx .agents/skills/auto-approve-curation/scripts/cli.ts mark \
