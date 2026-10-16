@@ -226,16 +226,22 @@ async function main(): Promise<void> {
 				}
 				return {
 					result: async () => ({
-						stopReason: "stop",
+						stopReason: "toolUse",
 						content: [
+							{ type: "text", text: "Returning metadata." },
 							{
-								type: "text",
-								text:
+								type: "toolCall",
+								id: "metadata-call",
+								name: "set_metadata",
+								arguments:
 									requestOptions.maxTokens === 512
-										? '{"promptSummary":"Make topics reflect completed work"}'
+										? { promptSummary: "Make topics reflect completed work" }
 										: emptyWork
-											? '{"topic":"Summarize initial session request","workSummary":""}'
-											: '{"topic":"Improve Pi session metadata","workSummary":"Added cumulative summaries for completed work."}',
+											? { topic: "Summarize initial session request", workSummary: "" }
+											: {
+												topic: "Improve Pi session metadata",
+												workSummary: "Added cumulative summaries for completed work.",
+											},
 							},
 						],
 						usage: usage(10, 4, 0.01),
@@ -263,6 +269,15 @@ async function main(): Promise<void> {
 			),
 	);
 	check("topic model call limits output", options?.maxTokens === 4096);
+	check(
+		"topic calls prefer strict tool schemas without requiring provider support",
+		requestContext.tools.length === 1 &&
+			requestContext.tools[0].name === "set_metadata" &&
+			requestContext.tools[0].constrainedSampling.type === "json_schema" &&
+			requestContext.tools[0].constrainedSampling.strict === "prefer" &&
+			requestContext.tools[0].parameters.additionalProperties === false &&
+			JSON.stringify(requestContext.tools[0].parameters.required) === JSON.stringify(["topic", "workSummary"]),
+	);
 	const sentPayload = JSON.parse(requestContext?.messages?.[0]?.content?.[0]?.text) as {
 		workSinceLastSummary: TopicInput["completedWork"];
 	};
@@ -272,6 +287,62 @@ async function main(): Promise<void> {
 	);
 	check("topic model usage is returned", result.usage.cost.total === 0.01);
 	check("metadata requests allow 20 seconds for transient latency", METADATA_TIMEOUT_MS === 20_000);
+
+	const textFallbackContext = {
+		modelRegistry: {
+			streamSimple: () => ({
+				result: async () => ({
+					stopReason: "stop",
+					content: [{
+						type: "text",
+						text: '{"topic":"Keep text metadata fallback","workSummary":"Summarized work without a tool call."}',
+					}],
+					usage: usage(10, 4, 0.01),
+				}),
+			}),
+		},
+	} as unknown as ExtensionContext;
+	const textFallback = await generateTopic(model, textFallbackContext, topicInput, new AbortController().signal);
+	check(
+		"text-only responses retain JSON fallback",
+		textFallback.topic === "Keep text metadata fallback" &&
+			textFallback.workSummary === "Summarized work without a tool call." &&
+			!textFallback.failure,
+	);
+
+	let invalidToolCalls = 0;
+	let invalidContent: unknown[] = [];
+	const invalidToolContext = {
+		modelRegistry: {
+			streamSimple: () => {
+				invalidToolCalls++;
+				return {
+					result: async () => ({ stopReason: "toolUse", content: invalidContent, usage: usage(10, 4, 0.01) }),
+				};
+			},
+		},
+	} as unknown as ExtensionContext;
+	for (const call of [
+		{ type: "toolCall", id: "bad-call", name: "wrong_tool", arguments: {} },
+		{ type: "toolCall", id: "bad-call", name: "set_metadata", arguments: [] },
+	]) {
+		invalidContent = [call, {
+			type: "text",
+			text: '{"topic":"Ignore invalid tool calls","workSummary":"Valid text must not mask an invalid call."}',
+		}];
+		const invalid = await generateTopic(model, invalidToolContext, topicInput, new AbortController().signal);
+		check("rejects invalid tool calls without falling back to text", invalid.failure?.kind === "parse" && !invalid.topic);
+	}
+	invalidContent = [{
+		type: "toolCall", id: "bad-call", name: "set_metadata",
+		arguments: { topic: "Too short", workSummary: "Valid work summary." },
+	}];
+	const invalidTopic = await generateTopic(model, invalidToolContext, topicInput, new AbortController().signal);
+	check(
+		"tool arguments still undergo local field validation",
+		invalidTopic.failure?.kind === "parse" && invalidTopic.workSummary === "Valid work summary.",
+	);
+	check("invalid metadata does not trigger retries", invalidToolCalls === 3);
 
 	const providerFailureContext = {
 		modelRegistry: {
@@ -401,8 +472,11 @@ async function main(): Promise<void> {
 		modelRegistry: {
 			streamSimple: () => ({
 				result: async () => ({
-					stopReason: "stop",
-					content: [{ type: "text", text: '{"topic":"Keep a valid session topic","workSummary":""}' }],
+					stopReason: "toolUse",
+					content: [{
+						type: "toolCall", id: "empty-summary", name: "set_metadata",
+						arguments: { topic: "Keep a valid session topic", workSummary: "" },
+					}],
 					usage: usage(10, 4, 0.01),
 				}),
 			}),
@@ -445,6 +519,12 @@ async function main(): Promise<void> {
 	check("prompt-summary response is parsed separately", summary.promptSummary === "Make topics reflect completed work");
 	check("prompt-summary metadata call omits reasoning", options !== undefined && !("reasoning" in options));
 	check("prompt-summary model call limits output", options?.maxTokens === 512);
+	check(
+		"prompt summaries prefer strict schemas with only their own field",
+		requestContext.tools.length === 1 &&
+			requestContext.tools[0].constrainedSampling.strict === "prefer" &&
+			JSON.stringify(requestContext.tools[0].parameters.required) === JSON.stringify(["promptSummary"]),
+	);
 	check(
 		"prompt-summary guidance retains its scope and limits",
 		requestContext.systemPrompt.includes("summarize only latestPrompt as an action or request") &&
