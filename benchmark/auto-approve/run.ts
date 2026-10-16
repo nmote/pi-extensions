@@ -17,7 +17,7 @@ const hash = (value: string | Buffer) => createHash("sha256").update(value).dige
 export function cliOptions(args: string[]) {
 	const { values } = parseArgs({ args, options: {
 		"chat-provider": { type: "string" }, "chat-model": { type: "string" },
-		provider: { type: "string" }, model: { type: "string" }, type: { type: "string" }, effort: { type: "string", default: "low" },
+		provider: { type: "string" }, model: { type: "string" }, type: { type: "string" }, effort: { type: "string", default: "medium" },
 		"timeout-ms": { type: "string", default: "30000" }, repetitions: { type: "string", default: "3" },
 		cases: { type: "string", default: join(root, "benchmark/auto-approve/cases.jsonl") },
 		output: { type: "string" }, "auth-path": { type: "string" },
@@ -103,7 +103,7 @@ const help = `Usage: npm run --silent benchmark:auto-approve -- --provider PROVI
   --type chat|classifier    Default chat when present, otherwise classifier
   --chat-provider PROVIDER --chat-model MODEL  Required classifier fallback
   --effort applies to chat, including hybrid fallback
-  --effort low|medium|high   Default low
+  --effort low|medium|high   Default medium
   --timeout-ms INTEGER      Default 30000
   --repetitions INTEGER     Default 3
   --cases PATH              Default committed cases.jsonl

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { main, sourceHash } from "./run.ts";
+import { cliOptions, main, sourceHash } from "./run.ts";
 import { isRunResult } from "./contracts.ts";
 
 const directory = await mkdtemp(join(tmpdir(), "pi-benchmark-"));
@@ -162,6 +162,12 @@ try {
 	assert.equal(hybridOutcome.estimatedCostUsd, 50 * 0.042 / 1e6 + 0.000044);
 	assert.ok("hybrid" in hybridReport.modelIdentity && hybridReport.modelIdentity.hybrid);
 	assert.equal(hybridReport.modelIdentity.hybrid.effort, "medium");
+
+	// Default effort is medium; explicit overrides preserved.
+	assert.equal(cliOptions([...args]).effort, "medium");
+	assert.equal(cliOptions([...args, "--effort", "low"]).effort, "low");
+	assert.equal(cliOptions([...args, "--effort", "high"]).effort, "high");
+	assert.equal((report as { effort: string }).effort, "medium");
 } finally {
 	ModelRuntime.create = originalCreate;
 	process.stdout.write = originalWrite;

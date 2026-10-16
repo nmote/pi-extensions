@@ -47,7 +47,7 @@ treated as unknown.
 `--type chat|classifier` selects the backend explicitly; otherwise the runner
 prefers a physical chat model and falls back to a classifier with the exact ID.
 
-Use `--help` for options. Defaults: low effort, 30-second timeout, three
+Use `--help` for options. Defaults: medium effort, 30-second timeout, three
 repetitions. Two repetitions are supported. Cases default to this directory's
 `cases.jsonl`, regardless of invoking cwd; explicit paths use invoking cwd.
 Compare models/efforts with separate invocations over the same dataset.
