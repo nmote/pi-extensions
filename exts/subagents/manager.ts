@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { statSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -305,9 +305,6 @@ class SubagentRun {
 			this.accountedUsage = structuredClone(state.accountedUsage);
 			this.status = state.snapshot.status;
 			this.phase = state.snapshot.phase;
-			if (this.status === "failed" && !this.failureKind && this.hasSavedProviderError()) {
-				this.failureKind = "provider";
-			}
 			this.activity.splice(0, this.activity.length, ...structuredClone(state.snapshot.activity));
 			if (["starting", "running", "waiting"].includes(this.status)) {
 				// A session restores messages, not an outstanding ask_supervisor RPC execution.
@@ -343,28 +340,44 @@ class SubagentRun {
 		return SessionManager.findById(this.task.cwd, this.sessionId, this.sessionDir);
 	}
 
-	private hasSavedProviderError(): boolean {
-		const file = this.savedSession();
-		if (!file) return false;
-		try {
-			const entries = readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-			const session = SessionManager.inMemory(this.task.cwd, undefined, entries);
-			const last = session.getBranch().filter((entry) => entry.type === "message").at(-1);
-			return last?.type === "message" && last.message.role === "assistant"
-				&& last.message.stopReason === "error"
-				&& (last.message.errorMessage || "Subagent stopped: error") === this.error;
-		} catch {
-			return false;
+	private recoveryBlockedReason(): string | undefined {
+		if (this.status !== "failed") return undefined;
+		if (this.failureKind === "protocol" || this.failureKind === "policy") {
+			return `Subagent ${this.id} failed with ${this.failureKind} and cannot be recovered`;
 		}
+		const file = this.savedSession();
+		if (!file) {
+			return `Saved session for subagent ${this.id} is missing: ${this.sessionId}`;
+		}
+		try {
+			statSync(file);
+		} catch (e: any) {
+			if (e?.code === "ENOENT") return `Saved session for subagent ${this.id} is missing: ${this.sessionId}`;
+			return `Saved session for subagent ${this.id} is unreadable: ${file}`;
+		}
+		return undefined;
+	}
+
+	private sanitizeErrorForPrompt(message: string, max = 500): string {
+		const singleLine = message.replace(/\s+/g, " ").trim();
+		return singleLine.length > max ? `${singleLine.slice(0, max - 1)}…` : singleLine;
+	}
+
+	isRecoverable(): boolean {
+		return this.status === "failed" && !this.recoveryBlockedReason();
 	}
 
 	assertCanContinue(): void {
-		if (this.suspending || (this.status !== "idle" && !(this.status === "failed" && this.failureKind === "provider"))) {
+		if (this.suspending) {
 			throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}${this.failureKind ? ` (${this.failureKind})` : ""}`);
 		}
-		if (this.status === "failed" && !this.savedSession()) {
-			throw new Error(`Saved session for subagent ${this.id} is missing: ${this.sessionId}`);
+		if (this.status === "idle") return;
+		if (this.status === "failed") {
+			const blocked = this.recoveryBlockedReason();
+			if (blocked) throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}${this.failureKind ? ` (${this.failureKind})` : ""}: ${blocked}`);
+			return;
 		}
+		throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}${this.failureKind ? ` (${this.failureKind})` : ""}`);
 	}
 
 	snapshot(): SubagentSnapshot {
@@ -388,7 +401,7 @@ class SubagentRun {
 			failureKind: this.failureKind,
 			previousFailure: this.previousFailure ? { ...this.previousFailure } : undefined,
 			sessionFile,
-			recoverable: this.status === "failed" && this.failureKind === "provider" && !!sessionFile,
+			recoverable: this.isRecoverable(),
 			activity: this.activity.map((entry) => ({ ...entry })),
 			usage: structuredClone(this.usage),
 			totalUsage: structuredClone(this.totalUsage),
@@ -438,7 +451,7 @@ class SubagentRun {
 		this.assertCanContinue();
 		if (!task.trim()) throw new Error("Subagent task must not be blank");
 		const recovering = this.status === "failed";
-		if (recovering) this.previousFailure = { kind: this.failureKind!, message: this.error! };
+		if (recovering) this.previousFailure = { kind: (this.failureKind ?? "process") as FailureKind, message: this.error! };
 		this.setStatus("running");
 		this.preparingTask = true;
 		this.hooks = hooks;
@@ -495,7 +508,10 @@ class SubagentRun {
 			this.setPhase("starting model");
 			this.emitUpdate();
 			this.preparingTask = false;
-			await rpc.send({ type: "prompt", message: `Task: ${task}` });
+			const taskMessage = recovering
+				? `Task: ${task}\n\n[Previous attempt was interrupted (error: ${this.sanitizeErrorForPrompt(this.previousFailure?.message ?? this.error ?? "unknown")}). Inspect existing state before repeating consequential actions that may have side effects.]`
+				: `Task: ${task}`;
+			await rpc.send({ type: "prompt", message: taskMessage });
 		} catch (error) {
 			this.fail(error instanceof Error ? error.message : String(error), error instanceof SubagentFailure ? error.kind : "process");
 		}
@@ -853,7 +869,9 @@ class SubagentRun {
 		this.setStatus("failed");
 		this.error = message;
 		this.failureKind = kind;
-		this.setPhase(kind === "provider" ? "provider failed; continue explicitly after resolving the error" : "failed");
+		// Determine recoverability after setting error/kind (saved session already exists for most failures)
+		const blocked = this.recoveryBlockedReason();
+		this.setPhase(blocked ? "failed" : "failed; continue explicitly after considering the error");
 		this.pushActivity(message);
 		const rpc = this.rpc;
 		this.rpc = undefined;
@@ -1030,7 +1048,7 @@ export class SubagentManager {
 	async cancel(id?: string): Promise<SubagentSnapshot[]> {
 		const runs = id ? [this.requireRun(id)] : [...this.runs.values()].filter((run) => {
 			const snapshot = run.snapshot();
-			return !TERMINAL_STATUSES.has(snapshot.status) || (snapshot.status === "failed" && snapshot.failureKind === "provider");
+			return !TERMINAL_STATUSES.has(snapshot.status) || !!snapshot.recoverable;
 		});
 		return Promise.all(runs.map((run) => run.cancel()));
 	}

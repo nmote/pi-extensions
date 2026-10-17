@@ -121,7 +121,7 @@ function formatResult(result: SubagentSnapshot): string {
 		case "completed":
 			return `${heading}\n\n${truncateOutput(result.output || "(no output)")}`;
 		case "failed":
-			return `${heading}\n\n${result.error || "Unknown failure"}${result.recoverable ? `\n\nContext saved. Use subagent_continue with id ${result.id} after resolving the provider error; no automatic retry.` : ""}${result.sessionFile ? `\n\nSession: ${result.sessionFile}` : ""}`;
+			return `${heading}\n\n${result.error || "Unknown failure"}${result.recoverable ? `\n\nContext saved. Use subagent_continue with id ${result.id} after considering the error; no automatic retry.` : ""}${result.sessionFile ? `\n\nSession: ${result.sessionFile}` : ""}`;
 		case "cancelled":
 			return `${heading}\n\n${result.error || "Cancelled"}`;
 		default:
@@ -380,7 +380,7 @@ export default function subagents(pi: ExtensionAPI): void {
 				"Before using subagent for review, inspect the change, identify a concrete risk, and select only specialties that match it. Treat delegation as one checkpoint per logical change.",
 				"Call list_subagents before setting subagent.agent or any subagent.tasks[].agent; use the returned descriptions to choose a named agent. General subagents do not need this lookup.",
 				"Do not use subagent to repeat a review unless later work materially changes the behavior or risk reviewed. Scope each task to the concrete question and relevant files or functions.",
-				"Reuse an idle or recoverable provider-failed subagent with subagent_continue so it retains context; resolve the provider error before retrying. Use subagent_cancel to end it when finished.",
+				"Reuse an idle or failed subagent with a usable saved session via subagent_continue so it retains context; consider the error before retrying. Use subagent_cancel to end it when finished.",
 				"When subagent reports a supervisor question, answer it yourself when existing context is sufficient; otherwise ask the user, then call subagent_reply with their answer.",
 				"Subagent runs with a different working directory require direct user approval.",
 				"Do not run parallel write-capable subagent tasks in the same worktree unless their changes are explicitly partitioned.",
@@ -444,9 +444,9 @@ export default function subagents(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_continue",
 		label: "Continue Subagent",
-		description: "Assign a related task to an idle or recoverable provider-failed subagent, retaining its conversation context. Failed children reopen from saved sessions; resolve the provider error before retrying. Reuses its agent, model, thinking level, cwd, and tools; inherits the parent's current approval mode and session guidance. Returns at task completion or a supervisor question. Use subagent_reply for waiting questions; cancelled children and other failures cannot be reused.",
+		description: "Assign a related task to an idle or failed subagent with a usable saved session, retaining its conversation context. Failed children reopen from persisted context; consider the error before retrying. Reuses its agent, model, thinking level, cwd, and tools; inherits the parent's current approval mode and session guidance. Returns at task completion or a supervisor question. Use subagent_reply for waiting questions; protocol/approval-policy failures, cancelled children, and missing sessions cannot be recovered.",
 		parameters: Type.Object({
-			id: Type.String({ minLength: 1, description: "Idle or recoverable provider-failed subagent ID" }),
+			id: Type.String({ minLength: 1, description: "Idle or failed subagent ID with a usable saved session" }),
 			task: TaskFields.task,
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

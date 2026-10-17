@@ -60,7 +60,7 @@ export function formatExpandedMetadata(result: SubagentSnapshot): string {
 		`- Lifetime cost: $${(result.totalUsage ?? result.usage).cost.total.toFixed(3)}`,
 		`- Model: ${formatModel(result)}`,
 		`- Working directory: ${result.cwd}`,
-		...(result.failureKind ? [`- Failure: ${result.failureKind}${result.recoverable ? "; continue explicitly after resolving the provider error" : "; not recoverable"}`] : []),
+		...(result.failureKind ? [`- Failure: ${result.failureKind}${result.recoverable ? "; continue explicitly after considering the error" : "; not recoverable"}`] : (result.status === "failed" && result.error ? [`- Failure: ${result.error}${result.recoverable ? "; continue explicitly after considering the error" : "; not recoverable"}`] : [])),
 		...(result.previousFailure ? [`- Previous failure (${result.previousFailure.kind}): ${result.previousFailure.message}`] : []),
 		...(result.sessionFile ? [`- Saved session: ${result.sessionFile}`] : []),
 	].join("\n");

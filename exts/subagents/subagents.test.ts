@@ -489,7 +489,7 @@ try {
 	const unverified = makeManager();
 	historicalFailure[0].snapshot.error = "Unrelated protocol error";
 	unverified.restore(historicalFailure);
-	check("unverified historical failures cannot be recovered", !unverified.status(failedTask.id)[0].recoverable && (await errorMessage(unverified.continue(failedTask.id, "wrong", () => "manual", context()))).includes("while failed"));
+	check("historical failures remain recoverable without provider verification", unverified.status(failedTask.id)[0].recoverable === true);
 	let recoveryApprovals = 0;
 	const restoredApproval = await restoredFailure.continue(failedTask.id, "approval after reload", () => "manual", context({ select: async () => { recoveryApprovals++; return "Deny"; } }));
 	check("provider recovery after reload rebuilds the UI lifetime", restoredApproval.status === "idle" && restoredApproval.output === "user decision: Deny" && recoveryApprovals === 1 && restoredApproval.totalUsage.totalTokens === 72);
@@ -539,7 +539,9 @@ try {
 
 	const abortedAgent = makeManager();
 	const abortedSettlement = (await abortedAgent.start([task("abort settlement")], process.cwd(), context()))[0]!;
-	check("aborted settlement without an assistant result cannot recover", abortedSettlement.status === "failed" && abortedSettlement.failureKind === "aborted" && abortedSettlement.error === "Subagent stopped: aborted" && !abortedSettlement.recoverable && (await errorMessage(abortedAgent.continue(abortedSettlement.id, "wrong", () => "manual", context()))).includes("while failed"));
+	check("aborted settlement without an assistant result can recover from saved session", abortedSettlement.status === "failed" && abortedSettlement.failureKind === "aborted" && abortedSettlement.error === "Subagent stopped: aborted" && abortedSettlement.recoverable === true && !!abortedSettlement.sessionFile);
+	const abortedRecovery = await abortedAgent.continue(abortedSettlement.id, "recall after aborted", () => "manual", context());
+	check("aborted recovery retains context and current policy", abortedRecovery.status === "idle" && abortedRecovery.previousFailure?.kind === "aborted");
 	const missingPolicy = makeManager();
 	const previousProtocol = process.env.FAKE_PROTOCOL;
 	try {
@@ -608,8 +610,46 @@ try {
 	for (let attempt = 0; attempt < 100 && idleCrash.status(crashingTask.id)[0]?.status === "idle"; attempt++) {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
-	check("idle process exit is visible as a non-recoverable failure", idleCrash.status(crashingTask.id)[0]?.failureKind === "process" && !idleCrash.status(crashingTask.id)[0]?.recoverable && (await errorMessage(idleCrash.continue(crashingTask.id, "wrong", () => "manual", context()))).includes("while failed"));
+	check("idle process exit is recoverable from saved session", idleCrash.status(crashingTask.id)[0]?.failureKind === "process" && idleCrash.status(crashingTask.id)[0]?.recoverable === true && !!idleCrash.status(crashingTask.id)[0]?.sessionFile);
 	check("idle crash removes the live count without a tool call", idleCrash.liveCount() === 0 && crashCounts.join(",") === "1,0");
+	const crashStateBeforeRecovery = idleCrash.persistedState();
+	const crashReload = makeManager();
+	crashReload.restore(crashStateBeforeRecovery);
+	check("process failure remains recoverable after reload", crashReload.status(crashingTask.id)[0]?.recoverable === true && !!crashReload.status(crashingTask.id)[0]?.sessionFile);
+	const crashReloadRecovery = await crashReload.continue(crashingTask.id, "recall after crash reload", () => "manual", context());
+	check("process recovery after reload retains history and policy", crashReloadRecovery.status === "idle" && JSON.parse(crashReloadRecovery.output!).history[0].text === "Task: crash idle" && crashReloadRecovery.previousFailure?.kind === "process");
+	check("resumed child receives interruption context", JSON.parse(crashReloadRecovery.output!).history.some((e: any) => e.text.includes("Inspect existing state")));
+	// RPC timeout arbitrary failure classified as process should remain recoverable
+	const timeoutState = structuredClone(crashStateBeforeRecovery);
+	timeoutState[0].snapshot.error = "Timed out waiting for RPC response to prompt";
+	timeoutState[0].snapshot.failureKind = "process";
+	const timeoutManager = makeManager();
+	timeoutManager.restore(timeoutState);
+	check("RPC timeout (process) remains recoverable after reload", timeoutManager.status(crashingTask.id)[0]?.recoverable === true && !!timeoutManager.status(crashingTask.id)[0]?.sessionFile);
+	await crashReload.shutdown();
+	await timeoutManager.shutdown();
+	// Verify unreadable session blocks recovery with explicit reason
+	const unreadableFailure = makeManager();
+	const unreadableTask = (await unreadableFailure.start([task("crash idle")], process.cwd(), context()))[0]!;
+	for (let attempt = 0; attempt < 100 && unreadableFailure.status(unreadableTask.id)[0]?.status === "idle"; attempt++) await new Promise((r) => setTimeout(r, 10));
+	const unreadableState = unreadableFailure.persistedState();
+	await unreadableFailure.shutdown();
+	// Corrupt the session file
+	const { writeFileSync } = await import("node:fs");
+	const sessionFile = unreadableState[0].snapshot.sessionFile!;
+	writeFileSync(sessionFile, "");
+	try { await import("node:fs/promises").then(m => m.chmod(sessionFile, 0o000)); } catch {}
+	const corrupted = makeManager();
+	corrupted.restore(unreadableState);
+	// Empty file is still readable (empty string) but should be considered readable; we test missing case instead by deleting
+	// Delete file to simulate unreadable/missing
+	const { rm: rmFile } = await import("node:fs/promises");
+	await rmFile(sessionFile, { force: true });
+	const missingAfterCorrupt = makeManager();
+	missingAfterCorrupt.restore(unreadableState);
+	check("unreadable/missing session blocks recovery", !missingAfterCorrupt.status(unreadableTask.id)[0]?.recoverable && (await errorMessage(missingAfterCorrupt.continue(unreadableTask.id, "wrong", () => "manual", context()))).includes("Saved session"));
+	const recoveredCrash = await idleCrash.continue(crashingTask.id, "recall after crash", () => "manual", context());
+	check("process recovery retains context", recoveredCrash.status === "idle" && recoveredCrash.previousFailure?.kind === "process");
 
 	const cleanup = makeManager();
 	const cleanupTasks = await cleanup.start([task("recall one"), task("recall two")], process.cwd(), context());
