@@ -191,7 +191,7 @@ function summary(snapshot: StoreSnapshot, item: BacklogItem): string {
 }
 
 function itemLine(snapshot: StoreSnapshot, item: BacklogItem, showRepos: boolean): string {
-	const line = item.parent ? `${summary(snapshot, item)} · parent ${item.parent}` : summary(snapshot, item);
+	const line = summary(snapshot, item);
 	return showRepos ? `${line} · ${item.repos.join(", ")}` : line;
 }
 
@@ -249,11 +249,36 @@ function listItems(snapshot: StoreSnapshot, operation: BacklogOperation): string
 			(!query || item.title.toLowerCase().includes(query) || item.body.toLowerCase().includes(query)),
 	).sort(compareItems);
 	const scope = repo ?? "all repositories";
-	const lines = items.length
-		? [
-				`backlog items for ${scope} (${items.length}):`,
-				...items.map((item) => itemLine(snapshot, item, allRepos || item.repos.length > 1)),
-			]
+	let rendered: string[];
+	if (parent) {
+		rendered = items.map((item) => itemLine(snapshot, item, allRepos || item.repos.length > 1));
+	} else {
+		const itemIds = new Set(items.map((item) => item.id));
+		const parents = items.filter((item) => !item.parent);
+		const orphans = items.filter((item) => item.parent !== undefined && !itemIds.has(item.parent));
+		const childrenByParent = new Map<string, BacklogItem[]>();
+		for (const item of items) {
+			if (!item.parent || !itemIds.has(item.parent)) continue;
+			const group = childrenByParent.get(item.parent);
+			if (group) group.push(item);
+			else childrenByParent.set(item.parent, [item]);
+		}
+		rendered = [];
+		for (const p of parents) {
+			rendered.push(itemLine(snapshot, p, allRepos || p.repos.length > 1));
+			const children = childrenByParent.get(p.id);
+			if (children) {
+				for (const child of children) {
+					rendered.push(`  ${itemLine(snapshot, child, allRepos || child.repos.length > 1)}`);
+				}
+			}
+		}
+		for (const orphan of orphans) {
+			rendered.push(itemLine(snapshot, orphan, allRepos || orphan.repos.length > 1));
+		}
+	}
+	const lines = rendered.length
+		? [`backlog items for ${scope} (${items.length}):`, ...rendered]
 		: [`no matching backlog items for ${scope}`];
 	for (const [id, error] of snapshot.errors) lines.push(`malformed backlog item ${id}: ${error}`);
 	return lines.join("\n");

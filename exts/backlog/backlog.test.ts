@@ -142,9 +142,21 @@ async function main(): Promise<void> {
 			"parents round-trip, filter list, and appear in read output",
 			parseItem(step1, readFileSync(tree.itemPath(step1), "utf8")).parent === planId &&
 				children ===
-					`backlog items for ~/repos/project (2):\n${step2} [in_progress] Step 2 · parent ${planId}\n${step1} [open] Step 1 · parent ${planId}` &&
+					`backlog items for ~/repos/project (2):\n${step2} [in_progress] Step 2\n${step1} [open] Step 1` &&
 				readPlan?.includes(`children (2):\n  ${step2} [in_progress] Step 2\n  ${step1} [open] Step 1`) === true &&
 				readStep?.includes(`parent: ${planId} [in_progress] Plan`) === true,
+		);
+		const [nested] = await runBacklogOperations(tree, [{ action: "list" }], context);
+		check(
+			"unfiltered list nests children beneath their parent with indentation",
+			nested ===
+				`backlog items for ~/repos/project (3):\n${planId} [in_progress] Plan\n  ${step2} [in_progress] Step 2\n  ${step1} [open] Step 1`,
+		);
+		// Orphan case: child whose parent status excludes it from the filtered set.
+		const [orphanList] = await runBacklogOperations(tree, [{ action: "list", statuses: ["open"] }], context);
+		check(
+			"children whose parent is not in the filtered set appear as top-level orphans",
+			orphanList === `backlog items for ~/repos/project (1):\n${step1} [open] Step 1`,
 		);
 		check(
 			"missing, self, and cyclic parents are rejected",
