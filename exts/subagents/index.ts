@@ -43,7 +43,10 @@ import {
 	clearSubagentModel,
 	describeSubagentModelPolicy,
 	formatModelRef,
+	isThinkingLevel,
 	loadSubagentModels,
+	saveSubagentEffort,
+	THINKING_LEVELS,
 	pickSubagentModel,
 	type SubagentModelsConfig,
 } from "./model-config.ts";
@@ -60,7 +63,6 @@ import {
 const MAX_PARALLEL_TASKS = 8;
 const SUPERVISOR_REPLIED_ENTRY = "subagent-supervisor-replied";
 const REPLIED_PHASE = "supervisor replied; continued in subagent_reply";
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 const TaskFields = {
 	task: Type.String({ minLength: 1, description: "Specific task to delegate" }),
@@ -524,9 +526,10 @@ export default function subagents(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("subagent-models", {
-		description: "Show or set the preferred subagent models for routine, basic, and complex tasks",
+		description: "Show or set preferred subagent models and effort for routine, basic, and complex tasks",
 		handler: async (args, ctx) => {
-			const [slotRaw, action] = (args ?? "").trim().split(/\s+/, 2);
+			const [slotRaw, action, level, ...extra] = (args ?? "").trim().split(/\s+/);
+			const usage = "usage: /subagent-models [basic|routine|complex [clear|effort <level|clear>]]";
 			if (!slotRaw) {
 				const config = loadSubagentModels();
 				const routine = config.routine ? formatModelRef(config.routine) : "not set (session model)";
@@ -537,17 +540,31 @@ export default function subagents(pi: ExtensionAPI): void {
 						`Basic subagent model: ${basic}`,
 						`Routine subagent model: ${routine}`,
 						`Complex subagent model: ${complex}`,
-						"Use /subagent-models basic|routine|complex to set, /subagent-models basic|routine|complex clear to unset.",
+						"Use /subagent-models <tier> to pick a model, <tier> clear to unset, or <tier> effort <level|clear> to set or clear effort.",
 					].join("\n"),
 					"info",
 				);
 				return;
 			}
-			if (slotRaw !== "routine" && slotRaw !== "basic" && slotRaw !== "complex") {
-				ctx.ui.notify("usage: /subagent-models [basic|routine|complex [clear]]", "error");
+			if ((slotRaw !== "routine" && slotRaw !== "basic" && slotRaw !== "complex") || extra.length > 0 || (action !== "effort" && level !== undefined)) {
+				ctx.ui.notify(usage, "error");
 				return;
 			}
 			const slot = slotRaw;
+			if (action === "effort") {
+				if (level !== "clear" && !isThinkingLevel(level)) {
+					ctx.ui.notify(`${usage}\nLevels: ${THINKING_LEVELS.join(", ")}`, "error");
+					return;
+				}
+				if (!loadSubagentModels()[slot]) {
+					ctx.ui.notify(`Set a model for ${slot} before setting effort`, "error");
+					return;
+				}
+				saveSubagentEffort(slot, level === "clear" ? undefined : level);
+				registerSubagentTool(loadSubagentModels());
+				ctx.ui.notify(`subagent-models: ${slot} effort ${level === "clear" ? "cleared" : `set to ${level}`}`, "info");
+				return;
+			}
 			if (action === "clear") {
 				clearSubagentModel(slot);
 				registerSubagentTool(loadSubagentModels());
@@ -555,7 +572,7 @@ export default function subagents(pi: ExtensionAPI): void {
 				return;
 			}
 			if (action !== undefined) {
-				ctx.ui.notify("usage: /subagent-models [basic|routine|complex [clear]]", "error");
+				ctx.ui.notify(usage, "error");
 				return;
 			}
 			const model = await pickSubagentModel(ctx, slot);

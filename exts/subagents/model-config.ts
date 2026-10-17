@@ -8,15 +8,23 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { pickModel } from "../shared/small-model.ts";
+
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ThinkingLevel[];
+
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+	return THINKING_LEVELS.some((level) => level === value);
+}
 
 export type SubagentModelSlot = "routine" | "basic" | "complex";
 
 export interface SubagentModelRef {
 	provider: string;
 	model: string;
+	thinkingLevel?: ThinkingLevel;
 }
 
 export interface SubagentModelsConfig {
@@ -33,7 +41,11 @@ function parseRef(raw: unknown): SubagentModelRef | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const value = raw as Record<string, unknown>;
 	return typeof value.provider === "string" && typeof value.model === "string"
-		? { provider: value.provider, model: value.model }
+		? {
+			provider: value.provider,
+			model: value.model,
+			...(isThinkingLevel(value.thinkingLevel) ? { thinkingLevel: value.thinkingLevel } : {}),
+		}
 		: undefined;
 }
 
@@ -65,7 +77,20 @@ export function saveSubagentModel(
 	path = configPath(),
 ): void {
 	const config = loadSubagentModels(path);
-	config[slot] = { provider, model };
+	config[slot] = { ...config[slot], provider, model };
+	writeConfig(path, config);
+}
+
+export function saveSubagentEffort(
+	slot: SubagentModelSlot,
+	thinkingLevel: ThinkingLevel | undefined,
+	path = configPath(),
+): void {
+	const config = loadSubagentModels(path);
+	const ref = config[slot];
+	if (!ref) throw new Error(`Set a model for ${slot} before setting effort`);
+	if (thinkingLevel === undefined) delete ref.thinkingLevel;
+	else ref.thinkingLevel = thinkingLevel;
 	writeConfig(path, config);
 }
 
@@ -76,7 +101,7 @@ export function clearSubagentModel(slot: SubagentModelSlot, path = configPath())
 }
 
 export function formatModelRef(ref: SubagentModelRef): string {
-	return `${ref.provider}/${ref.model}`;
+	return `${ref.provider}/${ref.model}${ref.thinkingLevel ? ` (thinkingLevel: ${ref.thinkingLevel})` : ""}`;
 }
 
 export interface SubagentModelPolicy {
@@ -95,11 +120,11 @@ export function describeSubagentModelPolicy(config: SubagentModelsConfig): Subag
 		text:
 			`Preferred subagent models (advisory, not binding): basic tasks -> ${basic}; ` +
 			`routine tasks -> ${routine}; complex tasks -> ${complex}. ` +
-			"An explicit user request for a specific model always overrides these.",
+			"Pass the recommended thinkingLevel explicitly when it fits. An explicit user request for a model or thinking level always overrides these.",
 		guidelines: [
 			`Prefer the user's subagent model preferences when they fit: basic tasks -> ${basic}, ` +
 				`routine tasks -> ${routine}, complex tasks -> ${complex}. ` +
-				"These are advisory; honor an explicit user request for a model first.",
+				"These are advisory; pass the recommended thinkingLevel explicitly when it fits, and honor an explicit user request for a model or thinking level first.",
 		],
 	};
 }

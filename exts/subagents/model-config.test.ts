@@ -10,6 +10,7 @@ import {
 	loadSubagentModels,
 	pickSubagentModel,
 	saveSubagentModel,
+	saveSubagentEffort,
 } from "./model-config.ts";
 
 let failures = 0;
@@ -69,6 +70,16 @@ async function main(): Promise<void> {
 		const all = loadSubagentModels(path);
 		check("complex slot persists alongside existing slots", all.complex?.model === "reasoning" && all.basic?.model === "openai/gpt-4.1-mini" && all.routine?.model === "claude-haiku-4-5");
 
+		saveSubagentEffort("complex", "off", path);
+		check("effort off persists", loadSubagentModels(path).complex?.thinkingLevel === "off");
+		saveSubagentModel("complex", "test", "replacement", path);
+		check("model replacement preserves effort", loadSubagentModels(path).complex?.thinkingLevel === "off");
+		saveSubagentEffort("complex", undefined, path);
+		check("clearing effort preserves the model", loadSubagentModels(path).complex?.thinkingLevel === undefined && loadSubagentModels(path).complex?.model === "replacement");
+
+		writeFileSync(path, JSON.stringify({ ...loadSubagentModels(path), complex: { provider: "test", model: "reasoning", thinkingLevel: "invalid" } }));
+		check("invalid effort preserves a valid model", loadSubagentModels(path).complex?.model === "reasoning" && loadSubagentModels(path).complex?.thinkingLevel === undefined);
+		saveSubagentEffort("complex", "high", path);
 		clearSubagentModel("complex", path);
 		const cleared = loadSubagentModels(path);
 		check("clear removes only the complex slot", cleared.complex === undefined && cleared.routine?.model === "claude-haiku-4-5" && cleared.basic?.model === "openai/gpt-4.1-mini");
@@ -122,6 +133,8 @@ async function main(): Promise<void> {
 		const picker = pickerCtx("test/tiny");
 		await command.handler("", picker.ctx);
 		check("command shows an unset complex slot", picker.notifications.at(-1)?.message.includes("Complex subagent model: not set (session model)") === true);
+		await command.handler("complex effort medium", picker.ctx);
+		check("effort requires a model", picker.notifications.at(-1)?.level === "error" && loadSubagentModels().complex === undefined);
 		await command.handler("complex", picker.ctx);
 		check("command picker saves the complex slot", loadSubagentModels().complex?.model === "tiny" && picker.title().includes("complex"));
 		check("command refreshes tool guidance after selection", tools.get("subagent")?.description.includes("complex tasks -> test/tiny") && tools.get("subagent")?.promptGuidelines.some((line: string) => line.includes("complex tasks -> test/tiny")));
@@ -132,6 +145,17 @@ async function main(): Promise<void> {
 		subagents({ ...pi, registerTool(tool: any) { reloadedTools.set(tool.name, tool); } } as ExtensionAPI);
 		check("reloading retains the complex preference in tool guidance", reloadedTools.get("subagent")?.description.includes("complex tasks -> test/tiny"));
 
+		await command.handler("complex effort medium", picker.ctx);
+		check("effort command persists and refreshes both policy surfaces", loadSubagentModels().complex?.thinkingLevel === "medium" && tools.get("subagent")?.description.includes("test/tiny (thinkingLevel: medium)") && tools.get("subagent")?.promptGuidelines.some((line: string) => line.includes("test/tiny (thinkingLevel: medium)")));
+		await command.handler("", picker.ctx);
+		check("summary displays effort", picker.notifications.at(-1)?.message.includes("test/tiny (thinkingLevel: medium)") === true);
+		for (const args of ["complex effort", "complex effort invalid", "complex effort high extra", "complex clear extra"]) {
+			await command.handler(args, picker.ctx);
+			check(`rejects malformed command: ${args}`, picker.notifications.at(-1)?.level === "error" && loadSubagentModels().complex?.thinkingLevel === "medium");
+		}
+		await command.handler("complex effort clear", picker.ctx);
+		check("effort clear keeps model and refreshes guidance", loadSubagentModels().complex?.model === "tiny" && loadSubagentModels().complex?.thinkingLevel === undefined && !tools.get("subagent")?.description.includes("thinkingLevel: medium"));
+		await command.handler("complex effort high", picker.ctx);
 		await command.handler("complex clear", picker.ctx);
 		check("command clearing complex keeps other slots", loadSubagentModels().complex === undefined && loadSubagentModels().routine?.model === "small");
 		check("clearing restores the session-model guidance", tools.get("subagent")?.description.includes("complex tasks -> the session model (omit model)"));

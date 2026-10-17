@@ -5,7 +5,7 @@ Delegates focused work to isolated Pi children that can ask their parent for gui
 ## Slash commands
 
 - `/subagents` — Show child status and named-agent discovery errors; `/subagents cancel <id|all>` ends children.
-- `/subagent-models [basic|routine|complex [clear]]` — Show model preferences, pick a model for a task tier, or clear that preference. Unset tiers inherit the session model.
+- `/subagent-models [basic|routine|complex [clear|effort <level|clear>]]` — Show preferences, pick a model for a task tier, or clear that tier. Use `effort <level>` to set its thinking-level recommendation and `effort clear` to remove only that recommendation. Levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set a model before setting effort; changing the model preserves effort. Unset tiers inherit the session model.
 - `/_subagent-task` — Internal child-only approval-policy update; not for manual use.
 - `/_subagent-handshake` — Internal child-only protocol check; not for manual use.
 
@@ -18,6 +18,8 @@ Delegates focused work to isolated Pi children that can ask their parent for gui
 - `subagent_status` — Inspect a child by ID, or omit the ID to inspect all children.
 - `subagent_cancel` — End a child and release its process/context, or omit the ID to end all live children.
 - `ask_supervisor` — Child-only tool to pause for missing context or a consequential choice; tool-approval requests instead go directly to you.
+
+Model and effort preferences are saved in `<agent-dir>/extensions/subagent-models.json`. Both are advisory: the parent passes the recommended model and `thinkingLevel` explicitly when appropriate. Dispatch does not infer a tier or apply its effort automatically; explicit user requests take precedence.
 
 ## Lifecycle
 
