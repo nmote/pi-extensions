@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { backlogGraph, MAX_GRAPH_NODES, openBacklogGraph, renderGraph, THEMES, type GraphFormat } from "./graph.ts";
+import { backlogGraph, htmlWrapper, MAX_GRAPH_NODES, openBacklogGraph, renderGraph, THEMES, type GraphFormat } from "./graph.ts";
 import { BacklogStore, formatItem, type BacklogItem, type StoreSnapshot } from "./store.ts";
 
 let failures = 0;
@@ -213,15 +213,15 @@ try {
 		undefined,
 		"light",
 		async (dot, format) => {
-			assert.equal(format, "svg");
+			assert.equal(format, "html");
 			rendered = dot;
-			return "/tmp/example.svg";
+			return "/tmp/example.html";
 		},
 		async () => { throw new Error("no graphical viewer"); },
 	);
 	check(
 		"renders a read-only snapshot and retains the output path if opening fails",
-		result.path === "/tmp/example.svg" &&
+		result.path === "/tmp/example.html" &&
 			result.count === 1 &&
 			result.openError === "no graphical viewer" &&
 			rendered.includes("aa0001") &&
@@ -253,17 +253,22 @@ try {
 	writeFileSync(join(fixture, "dot"), `#!/bin/sh
 printf '%s\\n' "$@" > "$PI_GRAPH_TEST_LOG"
 if grep -q 'fail-render' "$4"; then exit 1; fi
-cp "$4" "$3"
+if [ "$1" = "-Tsvg" ]; then
+  printf '%s' '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg width="100pt" height="50pt" viewBox="0 0 100 50" xmlns="http://www.w3.org/2000/svg"><text>test</text></svg>' > "$3"
+else
+  cp "$4" "$3"
+fi
 `, { mode: 0o700 });
 	for (const format of ["svg", "png"] as GraphFormat[]) {
 		const dot = "digraph { a -> b }";
-		const output = await renderGraph(dot, format === "svg" ? undefined : format);
+		const output = await renderGraph(dot, format);
 		try {
 			assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
 				`-T${format}`, "-o", output, join(dirname(output), "graph.dot"),
 			]);
 			assert.equal(output, join(dirname(output), `graph.${format}`));
-			assert.equal(readFileSync(output, "utf8"), dot);
+			if (format === "png") assert.equal(readFileSync(output, "utf8"), dot);
+			else assert.ok(readFileSync(output, "utf8").includes("<svg"));
 			assert.equal(statSync(output).mode & 0o777, 0o600);
 			assert.equal(statSync(join(dirname(output), "graph.dot")).mode & 0o777, 0o600);
 			assert.equal(statSync(dirname(output)).mode & 0o777, 0o700);
@@ -274,6 +279,35 @@ cp "$4" "$3"
 	await assert.rejects(renderGraph("fail-render", "png"));
 	const failedOutput = readFileSync(log, "utf8").trim().split("\n")[2];
 	assert.equal(existsSync(dirname(failedOutput)), false);
+	// HTML wrapper tests reuse same fake dot (no real Graphviz required)
+	{
+		const dotLight = backlogGraph(snapshot([item("aa0001")]), "aa0001", "light").dot;
+		const dotDark = backlogGraph(snapshot([item("aa0001")]), "aa0001", "dark").dot;
+		const htmlLight = await renderGraph(dotLight, "html");
+		try {
+			assert.ok(htmlLight.endsWith("index.html"));
+			const content = readFileSync(htmlLight, "utf8");
+			assert.ok(content.includes('background:white'));
+			assert.ok(content.includes('<svg'));
+			assert.ok(content.includes('width="100pt"'));
+			assert.ok(!content.includes('<img'));
+			assert.ok(!content.includes('<?xml'));
+			assert.equal(statSync(htmlLight).mode & 0o777, 0o600);
+			assert.ok(existsSync(join(dirname(htmlLight), "graph.svg")));
+		} finally { rmSync(dirname(htmlLight), { recursive: true, force: true }); }
+		const htmlDark = await renderGraph(dotDark, "html");
+		try {
+			const content = readFileSync(htmlDark, "utf8");
+			assert.ok(content.includes('background:black'));
+			assert.ok(content.includes('<svg'));
+		} finally { rmSync(dirname(htmlDark), { recursive: true, force: true }); }
+	}
+	check("default renderGraph format is html", (await (async () => {
+		const out = await renderGraph("digraph { a -> b }");
+		const ok = out.endsWith("index.html");
+		rmSync(dirname(out), { recursive: true, force: true });
+		return ok;
+	})()));
 } finally {
 	if (previousPath === undefined) delete process.env.PATH;
 	else process.env.PATH = previousPath;
@@ -281,6 +315,22 @@ cp "$4" "$3"
 	else process.env.PI_GRAPH_TEST_LOG = previousLog;
 	rmSync(fixture, { recursive: true, force: true });
 }
+
+// HTML wrapper uses themed background, natural width, and inline SVG for selectable text
+const sampleSvg = '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg width="2143pt" height="579pt" viewBox="0 0 2143 579" xmlns="http://www.w3.org/2000/svg"><text>aa0001</text></svg>';
+check("htmlWrapper uses themed background color", htmlWrapper(sampleSvg, "black").includes("background:black") && htmlWrapper(sampleSvg, "white").includes("background:white"));
+check("htmlWrapper preserves natural width for large graphs", htmlWrapper(sampleSvg, "black").includes("max-width:none") && htmlWrapper(sampleSvg, "black").includes("overflow:auto"));
+check("htmlWrapper inlines SVG for selectable text", htmlWrapper(sampleSvg, "black").includes("<svg") && htmlWrapper(sampleSvg, "black").includes("aa0001") && !htmlWrapper(sampleSvg, "black").includes('<img') && !htmlWrapper(sampleSvg, "black").includes('<?xml') && !htmlWrapper(sampleSvg, "black").includes('<!DOCTYPE'));
+check("htmlWrapper preserves SVG dimensions", htmlWrapper(sampleSvg, "black").includes('width="2143pt"') && htmlWrapper(sampleSvg, "black").includes('viewBox="0 0 2143 579"'));
+check("openBacklogGraph defaults to html", await (async () => {
+	const d = mkdtempSync(join(tmpdir(), "backlog-html-default-"));
+	try {
+		const s = new BacklogStore(d);
+		writeFileSync(s.itemPath("aa0001"), formatItem(item("aa0001")));
+		const r = await openBacklogGraph(s, "aa0001", undefined as unknown as GraphFormat, "light", async (_dot, fmt) => { assert.equal(fmt, "html"); return "/tmp/fake.html"; }, async () => {});
+		return r.path === "/tmp/fake.html";
+	} finally { rmSync(d, { recursive: true, force: true }); }
+})());
 
 if (failures) {
 	console.error(`\n${failures} check(s) failed`);

@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -8,7 +8,7 @@ import type { GraphTheme } from "./config.ts";
 
 const execFile = promisify(execFileCallback);
 export const MAX_GRAPH_NODES = 200;
-export type GraphFormat = "svg" | "png";
+export type GraphFormat = "svg" | "png" | "html";
 
 type Theme = {
 	bg: string;
@@ -185,8 +185,31 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: Graph
 	return { dot: lines.join("\n") + "\n", count: selected.size, unreadable };
 }
 
+export function htmlWrapper(svgContent: string, bg: string): string {
+	// svgContent is the raw SVG file; extract the <svg> element so it can be
+	// inlined (selectable text) — the XML prolog/doctype is not valid inside HTML.
+	const start = svgContent.indexOf("<svg");
+	const svg = start >= 0 ? svgContent.slice(start) : svgContent;
+	return `<!doctype html>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>backlog graph</title>\n<style>\n  html, body { margin:0; background:${bg}; }\n  html { min-height:100vh; }\n  body { padding:24px; overflow:auto; }\n  .wrap { display:inline-block; min-width:100%; text-align:center; }\n  .wrap svg { display:inline-block; width:auto; height:auto; max-width:none; background:${bg}; vertical-align:top; }\n</style>\n<body>\n  <div class="wrap">${svg}</div>\n</body>\n`;
+}
+
 /** Keep the output in a private temp directory so a viewer can read it after the command finishes. */
-export async function renderGraph(dot: string, format: GraphFormat = "svg"): Promise<string> {
+export async function renderGraph(dot: string, format: GraphFormat = "html"): Promise<string> {
+	if (format === "html") {
+		const svgPath = await renderGraph(dot, "svg");
+		const dir = join(svgPath, "..");
+		const htmlPath = join(dir, "index.html");
+		const bg = dot.includes('bgcolor="black"') ? "black" : "white";
+		try {
+			const svgContent = await readFile(svgPath, "utf8");
+			await writeFile(htmlPath, htmlWrapper(svgContent, bg), { mode: 0o600 });
+			await chmod(htmlPath, 0o600);
+			return htmlPath;
+		} catch (error) {
+			await rm(dir, { recursive: true, force: true });
+			throw error;
+		}
+	}
 	const dir = await mkdtemp(join(tmpdir(), "pi-backlog-graph-"));
 	const input = join(dir, "graph.dot");
 	const output = join(dir, `graph.${format}`);
@@ -216,7 +239,7 @@ export async function openGraph(path: string): Promise<void> {
 export async function openBacklogGraph(
 	store: BacklogStore,
 	id: string,
-	format: GraphFormat = "svg",
+	format: GraphFormat = "html",
 	theme: GraphTheme = "light",
 	render: (dot: string, format: GraphFormat) => Promise<string> = renderGraph,
 	open: (path: string) => Promise<void> = openGraph,

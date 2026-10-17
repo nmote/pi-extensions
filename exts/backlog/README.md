@@ -5,7 +5,7 @@ Tracks repository-labeled work across sessions, with parent/child plans, depende
 ## Slash commands
 
 - `/backlog [repository path|all|item ID]` — List active items for the current repository, another repository, or all repositories; an item ID shows its full contents.
-- `/backlog-graph <item ID> [--png]` — Save and open the item's connected graph as SVG or PNG (`--png` may also precede the ID). Requires Graphviz `dot` and macOS `open` or Linux `xdg-open`; the notification reports the saved path even if opening fails.
+- `/backlog-graph <item ID> [--html|--svg|--png]` — Save and open the item's connected graph (HTML wrapper with themed background by default, or raw SVG/PNG with `--svg`/`--png`; flag may precede the ID). Requires Graphviz `dot` and macOS `open` or Linux `xdg-open`; the notification reports the saved path even if opening fails.
 
 ## Agent tools
 

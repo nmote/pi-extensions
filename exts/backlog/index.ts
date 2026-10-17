@@ -94,12 +94,20 @@ function operationContext(ctx: ExtensionContext): OperationContext {
 	return { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), subagent: Boolean(process.env[SUBAGENT_RUN_ID_ENV]) };
 }
 
+const GRAPH_FLAGS = ["--png", "--svg", "--html"] as const;
+
 export function parseGraphArgs(args: string): { id: string; format: GraphFormat } | undefined {
-	const tokens = args.trim().split(/\s+/);
-	const png = tokens.includes("--png");
-	const ids = tokens.filter((token) => token !== "--png");
-	if (tokens.length !== (png ? 2 : 1) || ids.length !== 1 || !isItemId(ids[0])) return undefined;
-	return { id: ids[0], format: png ? "png" : "svg" };
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	if (tokens.length === 0) return undefined;
+	const flags = tokens.filter((t) => (GRAPH_FLAGS as readonly string[]).includes(t));
+	const ids = tokens.filter((t) => !(GRAPH_FLAGS as readonly string[]).includes(t));
+	if (flags.length > 1) return undefined;
+	if (ids.length !== 1 || !isItemId(ids[0])) return undefined;
+	if (tokens.length !== ids.length + flags.length) return undefined;
+	const flag = flags[0] as typeof GRAPH_FLAGS[number] | undefined;
+	if (flag === "--png") return { id: ids[0], format: "png" };
+	if (flag === "--svg") return { id: ids[0], format: "svg" };
+	return { id: ids[0], format: "html" };
 }
 
 export default function backlog(pi: ExtensionAPI): void {
@@ -153,12 +161,12 @@ export default function backlog(pi: ExtensionAPI): void {
 	);
 
 	pi.registerCommand("backlog-graph", {
-		description: "Open the connected backlog graph containing an item ID (SVG, or --png)",
+		description: "Open the connected backlog graph containing an item ID (HTML by default, or --svg/--png)",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
 			const parsed = parseGraphArgs(args);
 			if (!parsed) {
-				ctx.ui.notify("Usage: /backlog-graph <item ID> [--png]", "error");
+				ctx.ui.notify("Usage: /backlog-graph <item ID> [--html|--svg|--png]", "error");
 				return;
 			}
 			try {

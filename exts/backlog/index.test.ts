@@ -5,12 +5,16 @@ import { join } from "node:path";
 import backlog, { parseGraphArgs } from "./index.ts";
 
 for (const args of ["aa0001", "  aa0001\n"]) {
-	assert.deepEqual(parseGraphArgs(args), { id: "aa0001", format: "svg" });
+	assert.deepEqual(parseGraphArgs(args), { id: "aa0001", format: "html" });
+}
+for (const args of ["aa0001 --html", " --html\t aa0001 ", "aa0001 --svg", " --svg\t aa0001 "]) {
+	const expected = args.includes("--html") ? "html" : "svg";
+	assert.deepEqual(parseGraphArgs(args), { id: "aa0001", format: expected });
 }
 for (const args of ["aa0001 --png", " --png\t aa0001 "]) {
 	assert.deepEqual(parseGraphArgs(args), { id: "aa0001", format: "png" });
 }
-for (const args of ["", "--png", "invalid", "aa0001 --svg", "aa0001 --png --png", "aa0001 bb0002", "aa0001 --png extra"]) {
+for (const args of ["", "--png", "invalid", "aa0001 --unknown", "aa0001 --png --png", "aa0001 --html --png", "aa0001 bb0002", "aa0001 --png extra"]) {
 	assert.equal(parseGraphArgs(args), undefined, args);
 }
 
@@ -46,7 +50,7 @@ try {
 	await handlers.get("agent_end")!({}, ctx);
 	assert.deepEqual(statuses.at(-1), { color: "warning", text: "[backlog: unreadable]" });
 	await handlers.get("backlog-graph")!("aa0001 --unknown", ctx);
-	assert.deepEqual(notifications.at(-1), { message: "Usage: /backlog-graph <item ID> [--png]", level: "error" });
+	assert.deepEqual(notifications.at(-1), { message: "Usage: /backlog-graph <item ID> [--html|--svg|--png]", level: "error" });
 } finally {
 	if (previous === undefined) delete process.env.PI_BACKLOG_DIR;
 	else process.env.PI_BACKLOG_DIR = previous;
