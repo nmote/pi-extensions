@@ -4,18 +4,64 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { BacklogStatus, BacklogStore, StoreSnapshot } from "./store.ts";
+import type { GraphTheme } from "./config.ts";
 
 const execFile = promisify(execFileCallback);
 export const MAX_GRAPH_NODES = 200;
 export type GraphFormat = "svg" | "png";
 
-const STATUS_COLORS: Record<BacklogStatus, { leaf: string; parents: [string, string] }> = {
-	open: { leaf: "#e6f2ff", parents: ["#dcecff", "#ecf5ff"] },
-	approved: { leaf: "#d6f5db", parents: ["#c9efcf", "#e0f8e4"] },
-	in_progress: { leaf: "#fff1c2", parents: ["#ffecad", "#fff4cf"] },
-	done: { leaf: "#e8e8e8", parents: ["#dedede", "#eeeeee"] },
-	dropped: { leaf: "#f7dddd", parents: ["#f2d0d0", "#fae5e5"] },
+type Theme = {
+	bg: string;
+	graphFg: string;
+	nodeFg: string;
+	nodeBorder: string;
+	edge: string;
+	edgeFg: string;
+	clusterBorder: string;
+	clusterFg: string;
+	missing: string;
+	statuses: Record<BacklogStatus, { leaf: string; parents: [string, string] }>;
 };
+
+const LIGHT: Theme = {
+	bg: "white",
+	graphFg: "black",
+	nodeFg: "black",
+	nodeBorder: "#888888",
+	edge: "black",
+	edgeFg: "black",
+	clusterBorder: "#888888",
+	clusterFg: "black",
+	missing: "#ffcccc",
+	statuses: {
+		open: { leaf: "#e6f2ff", parents: ["#dcecff", "#ecf5ff"] },
+		approved: { leaf: "#d6f5db", parents: ["#c9efcf", "#e0f8e4"] },
+		in_progress: { leaf: "#fff1c2", parents: ["#ffecad", "#fff4cf"] },
+		done: { leaf: "#e8e8e8", parents: ["#dedede", "#eeeeee"] },
+		dropped: { leaf: "#f7dddd", parents: ["#f2d0d0", "#fae5e5"] },
+	},
+};
+
+const DARK: Theme = {
+	bg: "black",
+	graphFg: "#e8e8e8",
+	nodeFg: "#f0f0f0",
+	nodeBorder: "#aaaaaa",
+	edge: "#cccccc",
+	edgeFg: "#e8e8e8",
+	clusterBorder: "#aaaaaa",
+	clusterFg: "#f0f0f0",
+	missing: "#5c2a2a",
+	statuses: {
+		open: { leaf: "#1e3a5f", parents: ["#1a2f4a", "#243b5e"] },
+		approved: { leaf: "#1e3d2a", parents: ["#183222", "#244a32"] },
+		in_progress: { leaf: "#3b2e5a", parents: ["#30264a", "#4a3d6b"] },
+		done: { leaf: "#333333", parents: ["#2b2b2b", "#3a3a3a"] },
+		dropped: { leaf: "#4a2020", parents: ["#3d1a1a", "#552525"] },
+	},
+};
+
+export const THEMES: Record<GraphTheme, Theme> = { light: LIGHT, dark: DARK };
 
 function quote(value: string): string {
 	return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "").replace(/\n/g, "\\n").replace(/[\x00-\x1f\x7f]/g, " ")}"`;
@@ -44,9 +90,11 @@ export interface BacklogGraph {
 }
 
 /** Select the whole weakly connected component, then draw the original directed relationships. */
-export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGraph {
+export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: GraphTheme = "light"): BacklogGraph {
 	if (snapshot.errors.has(root)) throw new Error(`backlog item ${root} is malformed: ${snapshot.errors.get(root)}`);
 	if (!snapshot.items.has(root)) throw new Error(`backlog item not found: ${root}`);
+
+	const t = THEMES[theme] ?? LIGHT;
 
 	const neighbors = new Map<string, Set<string>>();
 	const edges = new Set<string>();
@@ -102,17 +150,18 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string): BacklogGrap
 	const unreadable: string[] = [];
 	const lines = [
 		"digraph backlog {",
-		"  graph [rankdir=LR, ranksep=1, compound=true, fontname=Helvetica, labelloc=b, label=\"Boxes: parent contains children    Dashed: prerequisite to dependent\"];",
-		"  node [shape=box, style=\"rounded,filled\", fontname=Helvetica, margin=\"0.25,0.12\", color=\"#888888\"];",
+		`  graph [rankdir=LR, ranksep=1, compound=true, fontname=Helvetica, labelloc=b, label="Boxes: parent contains children    Dashed: prerequisite to dependent", bgcolor=${quote(t.bg)}, fontcolor=${quote(t.graphFg)}];`,
+		`  node [shape=box, style="rounded,filled", fontname=Helvetica, margin="0.25,0.12", color=${quote(t.nodeBorder)}, fontcolor=${quote(t.nodeFg)}];`,
+		`  edge [color=${quote(t.edge)}, fontcolor=${quote(t.edgeFg)}];`,
 	];
 	const emit = (id: string, indent: string, depth: number): void => {
 		const item = snapshot.items.get(id)?.item;
 		const label = item ? `${id} [${item.status}]\n${wrapLabel(item.title)}\n${wrapLabel(`Repos: ${item.repos.join(", ")}`)}` : `${id}\n(${snapshot.errors.has(id) ? "malformed" : "missing"})`;
-		const colors = item ? STATUS_COLORS[item.status] : undefined;
-		const fill = colors ? (children.has(id) ? colors.parents[depth % 2] : colors.leaf) : "#ffcccc";
+		const colors = item ? t.statuses[item.status] : undefined;
+		const fill = colors ? (children.has(id) ? colors.parents[depth % 2] : colors.leaf) : t.missing;
 		if (children.has(id)) {
 			lines.push(`${indent}subgraph ${quote(`cluster_${id}`)} {`);
-			lines.push(`${indent}  graph [label=${quote(label)}, labelloc=t, style="rounded,filled", fillcolor=${quote(fill)}, color="#888888", margin=16];`);
+			lines.push(`${indent}  graph [label=${quote(label)}, labelloc=t, style="rounded,filled", fillcolor=${quote(fill)}, color=${quote(t.clusterBorder)}, fontcolor=${quote(t.clusterFg)}, margin=16];`);
 			if (endpoints.has(id)) {
 				lines.push(`${indent}  ${quote(id)} [label="", shape=point, width=0.08, style=invis];`);
 			}
@@ -168,10 +217,11 @@ export async function openBacklogGraph(
 	store: BacklogStore,
 	id: string,
 	format: GraphFormat = "svg",
+	theme: GraphTheme = "light",
 	render: (dot: string, format: GraphFormat) => Promise<string> = renderGraph,
 	open: (path: string) => Promise<void> = openGraph,
 ): Promise<{ path: string; count: number; unreadable: string[]; openError?: string }> {
-	const graph = backlogGraph(await store.load(), id);
+	const graph = backlogGraph(await store.load(), id, theme);
 	const path = await render(graph.dot, format);
 	try {
 		await open(path);

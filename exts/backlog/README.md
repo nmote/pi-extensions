@@ -17,4 +17,4 @@ Setting a child to `approved`, `in_progress`, or `done` automatically moves ever
 
 Items live under `<agent-dir>/backlog` by default; `PI_BACKLOG_DIR` overrides it. `<agent-dir>` defaults to `~/.pi/agent`, or `PI_CODING_AGENT_DIR`.
 
-Graph boxes nest parents and children; dashed arrows point from prerequisite to dependent, excluding ancestor/descendant dependencies. Labels show IDs, titles, statuses, and repositories.
+Graph boxes nest parents and children; dashed arrows point from prerequisite to dependent, excluding ancestor/descendant dependencies. Labels show IDs, titles, statuses, and repositories. Graphs default to a light theme (white background); set `{"graphTheme":"dark"}` (or `"theme":"dark"`) in `<agent-dir>/extensions/backlog.json` for the dark theme (black background, violet `in_progress`).

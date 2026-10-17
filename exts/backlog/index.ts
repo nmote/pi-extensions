@@ -24,6 +24,7 @@ import {
 	runBacklogOperations,
 	statusSummary,
 } from "./operations.ts";
+import { loadBacklogConfig } from "./config.ts";
 import { type GraphFormat, openBacklogGraph } from "./graph.ts";
 import { abbreviateHome } from "./repo.ts";
 import { BACKLOG_STATUSES, BacklogStore, backlogDir, isItemId } from "./store.ts";
@@ -161,7 +162,8 @@ export default function backlog(pi: ExtensionAPI): void {
 				return;
 			}
 			try {
-				const graph = await openBacklogGraph(store, parsed.id, parsed.format);
+				const theme = loadBacklogConfig().graphTheme;
+				const graph = await openBacklogGraph(store, parsed.id, parsed.format, theme);
 				const warning = graph.unreadable.length ? ` Unreadable linked items: ${graph.unreadable.join(", ")}.` : "";
 				if (graph.openError) {
 					ctx.ui.notify(`Graph saved at ${graph.path}, but could not open it: ${graph.openError}.${warning}`, "warning");

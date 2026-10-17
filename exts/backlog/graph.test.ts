@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { backlogGraph, MAX_GRAPH_NODES, openBacklogGraph, renderGraph, type GraphFormat } from "./graph.ts";
+import { backlogGraph, MAX_GRAPH_NODES, openBacklogGraph, renderGraph, THEMES, type GraphFormat } from "./graph.ts";
 import { BacklogStore, formatItem, type BacklogItem, type StoreSnapshot } from "./store.ts";
 
 let failures = 0;
@@ -54,6 +54,7 @@ const connected = snapshot(
 	],
 	[["jj0009", "bad frontmatter"]],
 );
+// Default theme is light (white background)
 const graph = backlogGraph(connected, "aa0001");
 check(
 	"selects the whole component through reverse links across statuses and repositories",
@@ -74,6 +75,15 @@ check(
 		graph.dot.includes('fillcolor="#e8e8e8"'),
 );
 check(
+	"default theme is light (white background, black text)",
+	graph.dot.includes('bgcolor="white"') && graph.dot.includes('fontcolor="black"') && graph.dot.includes('color="#888888"'),
+);
+const darkGraph = backlogGraph(connected, "aa0001", "dark");
+check(
+	"dark theme uses black background and light text",
+	darkGraph.dot.includes('bgcolor="black"') && darkGraph.dot.includes('fontcolor="#e8e8e8"') && darkGraph.dot.includes('color="#aaaaaa"') && darkGraph.dot.includes('fillcolor="#333333"'),
+);
+check(
 	"shows every repository associated with each item",
 	graph.dot.includes('label="aa0001 [open]\\naa0001\\nRepos: ~/one"') &&
 		graph.dot.includes('label="dd0004 [in_progress]\\ndd0004\\nRepos: ~/one, ~/two"'),
@@ -83,6 +93,14 @@ check(
 	graph.unreadable.join() === "gg0007,jj0009" &&
 		graph.dot.includes('label="gg0007\\n(missing)"') &&
 		graph.dot.includes('label="jj0009\\n(malformed)"'),
+);
+check(
+	"dark theme uses dark missing color",
+	darkGraph.dot.includes('fillcolor="#5c2a2a"') && !darkGraph.dot.includes('fillcolor="#ffcccc"'),
+);
+check(
+	"light theme uses light missing color",
+	graph.dot.includes('fillcolor="#ffcccc"') && !graph.dot.includes('fillcolor="#5c2a2a"'),
 );
 check(
 	"rejects absent or malformed roots",
@@ -97,24 +115,22 @@ check(
 	/exceeds 200 items/.test(errorOf(() => backlogGraph(snapshot(longChain), "000001"))),
 );
 
-for (const [status, leaf, dark, light] of [
-	["open", "#e6f2ff", "#dcecff", "#ecf5ff"],
-	["approved", "#d6f5db", "#c9efcf", "#e0f8e4"],
-	["in_progress", "#fff1c2", "#ffecad", "#fff4cf"],
-	["done", "#e8e8e8", "#dedede", "#eeeeee"],
-	["dropped", "#f7dddd", "#f2d0d0", "#fae5e5"],
-] as const) {
-	const shaded = backlogGraph(snapshot([
-		item("aa0001", { status }),
-		item("bb0002", { status, parent: "aa0001" }),
-		item("cc0003", { status, parent: "bb0002" }),
-		item("dd0004", { status, parent: "cc0003" }),
-	]), "dd0004");
-	const fills = [...shaded.dot.matchAll(/fillcolor="(#[a-f0-9]+)"/g)].map((match) => match[1]);
-	check(
-		`${status} alternates parent shades by depth and preserves the leaf color`,
-		fills.join() === [dark, light, dark, leaf].join(),
-	);
+for (const theme of ["light", "dark"] as const) {
+	const expected = THEMES[theme].statuses;
+	for (const status of Object.keys(expected) as (keyof typeof expected)[]) {
+		const { leaf, parents: [dark, light] } = expected[status];
+		const shaded = backlogGraph(snapshot([
+			item("aa0001", { status }),
+			item("bb0002", { status, parent: "aa0001" }),
+			item("cc0003", { status, parent: "bb0002" }),
+			item("dd0004", { status, parent: "cc0003" }),
+		]), "dd0004", theme);
+		const fills = [...shaded.dot.matchAll(/fillcolor="(#[a-f0-9]+)"/g)].map((match) => match[1]);
+		check(
+			`${theme} ${status} alternates parent shades by depth and preserves the leaf color`,
+			fills.join() === [dark, light, dark, leaf].join(),
+		);
+	}
 }
 
 const hierarchy = [
@@ -195,6 +211,7 @@ try {
 		store,
 		"aa0001",
 		undefined,
+		"light",
 		async (dot, format) => {
 			assert.equal(format, "svg");
 			rendered = dot;
@@ -210,12 +227,18 @@ try {
 			rendered.includes("aa0001") &&
 			readFileSync(store.itemPath("aa0001"), "utf8") === original,
 	);
-	const png = await openBacklogGraph(store, "aa0001", "png", async (_dot, format) => {
+	const png = await openBacklogGraph(store, "aa0001", "png", "light", async (_dot, format) => {
 		assert.equal(format, "png");
 		return "/tmp/example.png";
 	}, async (path) => { assert.equal(path, "/tmp/example.png"); });
 	assert.equal(png.path, "/tmp/example.png");
 	assert.equal(png.openError, undefined);
+	// dark theme via explicit param
+	const darkResult = await openBacklogGraph(store, "aa0001", "svg", "dark", async (dot) => {
+		assert.ok(dot.includes('bgcolor="black"'));
+		return "/tmp/dark.svg";
+	}, async () => {});
+	assert.equal(darkResult.path, "/tmp/dark.svg");
 } finally {
 	rmSync(dir, { recursive: true, force: true });
 }
