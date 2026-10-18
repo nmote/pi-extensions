@@ -7,6 +7,9 @@ Controls tool permissions using explicit rules, human approval, or a background-
 - `/auto` — Show the mode, evaluator backend, effort, and policy settings.
   - `/auto manual|auto|yolo` — Choose prompting, model evaluation, or automatic permission for unmatched calls; deny rules always apply.
   - `/auto guidance [clear]` — View/edit session evaluator guidance, or clear it.
+  - `/auto guidance save <name>` — Save current guidance as a global preset; confirm before overwriting.
+  - `/auto guidance load [name]` — Fuzzy-search preset names in the TUI (plain selection over RPC), or supply a name, then review/edit before replacing session guidance.
+  - `/auto guidance delete <name>` — Delete a preset after confirmation; active session guidance is unchanged.
   - `/auto effort [low|medium|high]` — Pick or set evaluator reasoning effort (`evaluator.reasoningEffort` in configuration; applies to chat, including Jev fallback).
   - `/auto evaluator [chat|jev]` — Pick or set the evaluator backend (`evaluator.backend` in configuration). Jev then offers authenticated TypeSafe and Workers AI providers, skipping the provider picker when only one is available. Cancellation preserves settings.
   - `/auto stats` — Show evaluation, Jev chat-fallback, and human-approval counters.
@@ -50,7 +53,9 @@ Cloudflare AI Gateway (one-time manual setup): create a Custom Provider with slu
 {"providers": {"typesafe": {"baseUrl": "https://gateway.ai.cloudflare.com/v1/ACCOUNT/GATEWAY/custom-typesafe/v1/", "headers": {"cf-aig-authorization": "Bearer $CF_AIG_TOKEN"}}}}
 ```
 
-Approval dialogs offer **Approve once + edit session guidance…**. Like `/auto guidance`, this supplies session-scoped evaluator instructions. Name operations and targets explicitly: the evaluator cannot see your conversation. Guidance persists across resume/reload and applies to subagents; a footer indicator marks it active. It overrides conflicting evaluator defaults/context within its scope, but cannot override deny rules, explicit denials, or injection safeguards. It affects evaluated calls only, not allowlisted calls or manual/yolo behavior. Editing or clearing it invalidates cached and pending verdicts, but does not revoke calls already authorized by the final main-session policy check or separate exact-call approvals.
+Presets live in `<agent-dir>/extensions/auto-approve-guidance/<name>.txt` (private: directory 0700, files 0600). Names are 1–64 letters, digits, underscores, or hyphens, starting with a letter or digit. Presets are available across repositories but never activate automatically. Loading copies the text into the session; session edits do not update the preset. Review repository-specific targets before applying. Presets may contain sensitive authorization or paths; delete them when unneeded.
+
+Approval dialogs offer **Approve once + edit session guidance…** and **Approve once + load guidance preset…**. Like `/auto guidance`, this supplies session-scoped evaluator instructions. Name operations and targets explicitly: the evaluator cannot see your conversation. Guidance persists across resume/reload and applies to subagents; a footer indicator marks it active. It overrides conflicting evaluator defaults/context within its scope, but cannot override deny rules, explicit denials, or injection safeguards. It affects evaluated calls only, not allowlisted calls or manual/yolo behavior. Editing or clearing it invalidates cached and pending verdicts, but does not revoke calls already authorized by the final main-session policy check or separate exact-call approvals.
 
 ## Evaluation logging
 

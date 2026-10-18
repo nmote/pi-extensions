@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,9 @@ function harness(entries: Entry[] = [], parent?: { pi: any; ctx: any }, token = 
 	const controls = {
 		stopped: false,
 		choice: "Approve once + edit session guidance…" as string | undefined,
+		preset: "pr-review" as string | undefined,
+		confirm: true,
+		options: [] as string[],
 		editor: async (_prefill: string): Promise<string | undefined> => "Allow Linear updates in project X",
 		evaluate: async (prompt: string) => verdict(prompt.includes("Session guidance (trusted user authorization)") ? "allow" : "review"),
 	};
@@ -63,10 +66,15 @@ function harness(entries: Entry[] = [], parent?: { pi: any; ctx: any }, token = 
 			},
 		},
 		ui: {
-			theme: { fg: (_color: string, text: string) => text },
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
 			setStatus: (_key: string, text: string) => statuses.push(text), setWidget() {},
 			notify: (text: string) => notices.push(text),
-			select: async (title: string) => { selections.push(title); return controls.choice; },
+			select: async (title: string, options: string[]) => {
+				selections.push(title);
+				controls.options = options;
+				return title.includes("Load guidance preset") ? controls.preset : controls.choice;
+			},
+			confirm: async () => controls.confirm,
 			editor: async (title: string, prefill: string) => { editors.push(title); return controls.editor(prefill); },
 			input: async (title: string, request: string): Promise<string | undefined> => {
 				if (!parent || title !== `[[pi-subagent-guidance:${token}]]`) return undefined;
@@ -123,6 +131,67 @@ try {
 		defaultMode: "auto", deny: [{ tool: "forbidden" }],
 		context: [{ tool: "linear_update", instructions: "External writes require review" }],
 	}));
+
+	const presets = harness();
+	await presets.start();
+	await presets.command("guidance save empty");
+	check("empty guidance cannot become a preset", presets.notices.at(-1)!.includes("empty guidance"));
+	await presets.command("guidance");
+	await presets.command("guidance save pr-review");
+	const presetPath = join(temp, "extensions/auto-approve-guidance/pr-review.txt");
+	const savedText = readFileSync(presetPath, "utf8");
+	check("saving creates private global storage without changing session guidance",
+		savedText === (await presets.policy()).text && (await presets.policy()).revision === 1 &&
+		(statSync(presetPath).mode & 0o777) === 0o600 && (statSync(join(temp, "extensions/auto-approve-guidance")).mode & 0o777) === 0o700);
+	const fresh = harness();
+	await fresh.start();
+	check("presets are not activated in new sessions", (await fresh.policy()).text === "");
+	fresh.controls.editor = async (prefill) => `${prefill} for this checkout`;
+	await fresh.command("guidance load pr-review");
+	check("loading reviews a copy and leaves the saved preset unchanged",
+		(await fresh.policy()).text === `${savedText} for this checkout` && readFileSync(presetPath, "utf8") === savedText && fresh.editors.at(-1)!.includes("replace session guidance"));
+	fresh.controls.confirm = false;
+	await fresh.command("guidance save pr-review");
+	await fresh.command("guidance delete pr-review");
+	check("overwriting and deletion require confirmation", readFileSync(presetPath, "utf8") === savedText);
+	fresh.controls.editor = async () => undefined;
+	await fresh.command("guidance load");
+	check("cancelled preset review preserves active guidance", (await fresh.policy()).revision === 1 && fresh.controls.options.includes("pr-review"));
+	await fresh.command("guidance load missing");
+	await fresh.command("guidance save ../escape");
+	check("missing and invalid presets do not change guidance", (await fresh.policy()).revision === 1 && fresh.notices.at(-1)!.includes("Preset names"));
+	fresh.controls.editor = async (prefill) => prefill;
+	fresh.controls.choice = "Approve once + load guidance preset…";
+	fresh.controls.evaluate = async () => verdict("review");
+	await fresh.escalate("preset-approval");
+	check("approval dialogs can load presets and grant only the exact one-shot retry",
+		(await fresh.policy()).text === savedText && (await fresh.gate("preset-approval")) === undefined && (await fresh.gate("preset-approval"))?.block === true);
+	const tui = harness();
+	await tui.start();
+	(tui.ctx as any).mode = "tui";
+	let customPickers = 0;
+	(tui.ctx.ui as any).custom = (factory: any) => new Promise((resolve) => {
+		customPickers++;
+		const picker = factory({}, tui.ctx.ui.theme, {}, resolve);
+		picker.handleInput("prr");
+		picker.handleInput("\r");
+	});
+	tui.controls.editor = async (prefill) => prefill;
+	await tui.command("guidance load");
+	check("TUI preset loading fuzzy-searches names before reviewing guidance",
+		customPickers === 1 && (await tui.policy()).text === savedText && tui.editors.length === 1 && tui.selections.length === 0);
+	await tui.command("guidance load pr-review");
+	check("a named preset bypasses the picker but still requires review", customPickers === 1 && tui.editors.length === 2);
+	tui.controls.choice = "Approve once + load guidance preset…";
+	tui.controls.evaluate = async () => verdict("review");
+	await tui.escalate("searchable-preset");
+	check("approval dialogs also use the searchable preset picker", customPickers === 2 && (await tui.gate("searchable-preset")) === undefined);
+
+	fresh.controls.confirm = true;
+	await fresh.command("guidance delete pr-review");
+	check("deleting a preset does not revoke the session copy", (await fresh.policy()).text === savedText);
+	await fresh.command("guidance load");
+	check("an empty preset picker leaves active guidance alone", fresh.notices.at(-1)!.includes("No guidance presets saved") && (await fresh.policy()).revision === 2);
 
 	const root = harness();
 	await root.start();
@@ -231,6 +300,14 @@ try {
 	await origin.escalate("forwarded");
 	check("the originating child commits a forwarded edit before granting its one-shot retry",
 		(await forwardingRoot.policy()).revision === 1 && (await origin.gate("forwarded")) === undefined);
+	await forwardingRoot.command("guidance save pr-review");
+	forwardingRoot.controls.choice = "Approve once + load guidance preset…";
+	forwardingRoot.controls.editor = async (prefill) => `${prefill} via preset`;
+	origin.controls.evaluate = async () => verdict("review");
+	await origin.escalate("forwarded-preset");
+	check("forwarded preset approval commits in the main session and grants a one-shot retry",
+		(await forwardingRoot.policy()).text.endsWith("via preset") && (await origin.gate("forwarded-preset")) === undefined);
+	forwardingRoot.controls.choice = "Approve once + edit session guidance…";
 	const nestedEditorOpened = deferred<void>();
 	const nestedEditorAnswer = deferred<string | undefined>();
 	forwardingRoot.controls.editor = async () => { nestedEditorOpened.resolve(); return nestedEditorAnswer.promise; };
@@ -242,7 +319,7 @@ try {
 	await nestedApproval;
 	nestedEditorAnswer.resolve("Allow everything");
 	await flush();
-	check("a cancelled descendant cannot commit a late editor response while its parents remain running", (await forwardingRoot.policy()).revision === 1);
+	check("a cancelled descendant cannot commit a late editor response while its parents remain running", (await forwardingRoot.policy()).revision === 2);
 
 	const rpcRoot = harness();
 	await rpcRoot.start();

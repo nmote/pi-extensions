@@ -45,6 +45,8 @@ import { Key } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { EVALUATOR_CACHE_ENTRY, EvaluatorCache } from "./cache.ts";
 import { ApprovalQueue } from "./approval-queue.ts";
+import { deleteGuidancePreset, listGuidancePresets, loadGuidancePreset, saveGuidancePreset, validatePresetName } from "./guidance-presets.ts";
+import { pickGuidancePreset } from "./guidance-preset-picker.ts";
 import { loadBuiltinRoots, supplementalRoots } from "./builtin-roots.ts";
 import {
 	type AutoApproveConfig, BACKENDS, EFFORTS, type EvaluatorBackend, isBackend, isEffort, isMode, loadConfig,
@@ -98,6 +100,7 @@ const MODE_ENTRY = "auto-approve-mode";
 const STATS_ENTRY = "auto-approve-stats";
 const GUIDANCE_ENTRY = "auto-approve-guidance";
 const EDIT_GUIDANCE_CHOICE = "Approve once + edit session guidance…";
+const LOAD_GUIDANCE_CHOICE = "Approve once + load guidance preset…";
 
 type Stats = Record<AutoApproveStat, number>;
 
@@ -212,19 +215,24 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		));
 	});
 
-	async function collectGuidance(ctx: ExtensionContext, signal: AbortSignal): Promise<GuidanceRequest | undefined> {
+	async function collectGuidance(ctx: ExtensionContext, signal: AbortSignal, preset?: { name?: string }): Promise<GuidanceRequest | undefined> {
 		const current = await exchangeGuidance({ action: "get" }, ctx);
 		if (signal.aborted) return undefined;
-		const text = await ctx.ui.editor(
-			tagApprovalTitle("Session approval guidance — main agent and all subagents, including future resumes"),
-			current.text,
-		);
+		let initial = current.text;
+		let title = "Session approval guidance — main agent and all subagents, including future resumes";
+		if (preset) {
+			const name = preset.name ?? await pickGuidancePreset(ctx, signal);
+			if (!name || signal.aborted) return undefined;
+			initial = loadGuidancePreset(name);
+			title = `Load preset ${name} — review/edit to replace session guidance for main agent and all subagents, including future resumes`;
+		}
+		const text = await ctx.ui.editor(tagApprovalTitle(title), initial);
 		return text === undefined || signal.aborted ? undefined : { action: "set", text, expectedRevision: current.revision };
 	}
 
-	async function editGuidance(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
+	async function editGuidance(ctx: ExtensionContext, signal: AbortSignal, preset?: { name?: string }): Promise<void> {
 		try {
-			const edit = await collectGuidance(ctx, signal);
+			const edit = await collectGuidance(ctx, signal, preset);
 			if (edit) await exchangeGuidance(edit, ctx);
 		} catch (error) {
 			ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
@@ -236,13 +244,17 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	): Promise<{ choice: string | undefined; signal: AbortSignal }> {
 		return approvalQueue.select(async (dialogSignal) => {
 			const dialogCtx = { ...ctx, signal: dialogSignal };
-			const options = choices.includes(EDIT_GUIDANCE_CHOICE) ? choices : [...choices, EDIT_GUIDANCE_CHOICE];
+			const options = [...choices];
+			for (const option of [EDIT_GUIDANCE_CHOICE, LOAD_GUIDANCE_CHOICE]) {
+				if (!options.includes(option)) options.push(option);
+			}
 			const choice = await ctx.ui.select(tagApprovalTitle(title), options, { signal: dialogSignal });
 			try {
-				const edit = choice === EDIT_GUIDANCE_CHOICE
-					? await collectGuidance(dialogCtx, dialogSignal)
+				const editing = choice === EDIT_GUIDANCE_CHOICE || choice === LOAD_GUIDANCE_CHOICE;
+				const edit = editing
+					? await collectGuidance(dialogCtx, dialogSignal, choice === LOAD_GUIDANCE_CHOICE ? {} : undefined)
 					: parseGuidanceRequest(choice);
-				if (choice !== EDIT_GUIDANCE_CHOICE && edit?.action !== "set") return choice;
+				if (!editing && edit?.action !== "set") return choice;
 				if (!edit || dialogSignal.aborted) return undefined;
 				// Only the originating agent commits, after its own cancellation check.
 				// Intermediate parents forward the edit without authorizing a cancelled descendant.
@@ -605,7 +617,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			const decision = await selectApproval(
 				ctx,
 				`Approve escalated tool call?\n\n${preview(pending.toolName, pending.input, pending.cwd)}\n\nAgent justification:\n${justification}\n\n(Evaluator: ${pending.reason})`,
-				["Approve once", EDIT_GUIDANCE_CHOICE, "Deny"], signal,
+				["Approve once", EDIT_GUIDANCE_CHOICE, LOAD_GUIDANCE_CHOICE, "Deny"], signal,
 			);
 			const choice = decision.signal.aborted ? undefined : decision.choice;
 
@@ -792,7 +804,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("auto", {
-		description: "Auto-approval: /auto [manual|auto|yolo|guidance [clear]|effort [low|medium|high]|evaluator [chat|jev]|stats|test <cmd>]",
+		description: "Auto-approval: /auto [manual|auto|yolo|guidance [clear|save <name>|load [name]|delete <name>]|effort [low|medium|high]|evaluator [chat|jev]|stats|test <cmd>]",
 		handler: async (args, ctx) => {
 			const trimmed = (args ?? "").trim();
 
@@ -814,21 +826,44 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				return;
 			}
 
-			if (trimmed === "guidance" || trimmed === "guidance clear") {
+			if (trimmed === "guidance" || trimmed.startsWith("guidance ")) {
+				const match = /^guidance(?: (clear|save|load|delete)(?: ([^\s]+))?)?$/.exec(trimmed);
+				const action = match?.[1];
+				const name = match?.[2];
+				if (!match || ((action === "save" || action === "delete") && !name) || (action === "clear" && name)) {
+					ctx.ui.notify("Usage: /auto guidance [clear|save <name>|load [name]|delete <name>]", "warning");
+					return;
+				}
 				if (!ctx.hasUI) {
 					ctx.ui.notify("Session guidance requires a user UI", "warning");
 					return;
 				}
 				await approvalQueue.select(async (signal) => {
-					if (trimmed === "guidance") {
-						await editGuidance({ ...ctx, signal }, signal);
-					} else {
-						try {
-							const current = await exchangeGuidance({ action: "get" }, ctx);
-							if (!signal.aborted) await exchangeGuidance({ action: "set", text: "", expectedRevision: current.revision }, ctx);
-						} catch (error) {
-							ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
+					const dialogCtx = { ...ctx, signal };
+					try {
+						if (name) validatePresetName(name);
+						if (!action || action === "load") {
+							await editGuidance(dialogCtx, signal, action === "load" ? { name } : undefined);
+						} else if (action === "delete") {
+							if (await ctx.ui.confirm(tagApprovalTitle(`Delete guidance preset ${name}?`), "Active session guidance will not change.", { signal }) && !signal.aborted) {
+								deleteGuidancePreset(name!);
+								ctx.ui.notify(`Deleted guidance preset ${name}`, "info");
+							}
+						} else {
+							const current = await exchangeGuidance({ action: "get" }, dialogCtx);
+							if (action === "save") {
+								if (!current.text.trim()) throw new Error("Cannot save empty guidance as a preset");
+								if (listGuidancePresets().includes(name!) && !await ctx.ui.confirm(tagApprovalTitle(`Overwrite guidance preset ${name}?`), "Replace the saved preset with current session guidance.", { signal })) return undefined;
+								if (!signal.aborted) {
+									saveGuidancePreset(name!, current.text);
+									ctx.ui.notify(`Saved guidance preset ${name}`, "info");
+								}
+							} else if (!signal.aborted) {
+								await exchangeGuidance({ action: "set", text: "", expectedRevision: current.revision }, dialogCtx);
+							}
 						}
+					} catch (error) {
+						ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
 					}
 					return undefined;
 				}, ctx.signal);
@@ -946,7 +981,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				return;
 			}
 
-			ctx.ui.notify(`Unknown: /auto ${trimmed}\nUse: manual | auto | yolo | guidance [clear] | effort [low|medium|high] | evaluator [chat|jev] | stats | test <cmd> | test <tool> <json>`, "warning");
+			ctx.ui.notify(`Unknown: /auto ${trimmed}\nUse: manual | auto | yolo | guidance [clear|save <name>|load [name]|delete <name>] | effort [low|medium|high] | evaluator [chat|jev] | stats | test <cmd> | test <tool> <json>`, "warning");
 		},
 	});
 

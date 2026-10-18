@@ -609,8 +609,8 @@ async function main(): Promise<void> {
 			const results = requests.map((params) => escalate(params));
 			await flushDialogs();
 			check("concurrent escalations open only the first dialog", dialogs.opened.length === 1 && dialogs.opened[0].title.includes("fifo-once"));
-			check("escalations offer only one-shot approval, guidance editing, and denial in order",
-				JSON.stringify(dialogs.opened[0].choices) === JSON.stringify(["Approve once", "Approve once + edit session guidance…", "Deny"]));
+			check("escalations offer one-shot approval, guidance editing/loading, and denial in order",
+				JSON.stringify(dialogs.opened[0].choices) === JSON.stringify(["Approve once", "Approve once + edit session guidance…", "Approve once + load guidance preset…", "Deny"]));
 			dialogs.opened[0].answer("Approve once");
 			await flushDialogs();
 			check("second approval follows the first", dialogs.opened.length === 2 && dialogs.opened[1].title.includes("fifo-deny"));
@@ -644,7 +644,7 @@ async function main(): Promise<void> {
 			check("manual and escalated approvals share one queue", dialogs.opened.length === 2 && dialogs.opened[1].title.includes("cancel-survivor") && dialogs.maxActive === 1);
 			check("manual approvals retain their session-wide option and guidance placement",
 				JSON.stringify(dialogs.opened[0].choices) === JSON.stringify([
-					"Approve once", "Approve (always this exact call this session)", "Deny", "Approve once + edit session guidance…",
+					"Approve once", "Approve (always this exact call this session)", "Deny", "Approve once + edit session guidance…", "Approve once + load guidance preset…",
 				]));
 			const beforeLateResponse = humans().length;
 			dialogs.opened[0].answer("Approve (always this exact call this session)");
