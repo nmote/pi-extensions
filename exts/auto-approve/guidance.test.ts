@@ -138,6 +138,8 @@ try {
 	check("empty guidance cannot become a preset", presets.notices.at(-1)!.includes("empty guidance"));
 	await presets.command("guidance");
 	await presets.command("guidance save pr-review");
+	await presets.command("guidance save");
+	check("saving without a name requires a load, not just a save", presets.notices.at(-1)!.startsWith("Usage:"));
 	const presetPath = join(temp, "extensions/auto-approve-guidance/pr-review.txt");
 	const savedText = readFileSync(presetPath, "utf8");
 	check("saving creates private global storage without changing session guidance",
@@ -151,7 +153,7 @@ try {
 	check("loading reviews a copy and leaves the saved preset unchanged",
 		(await fresh.policy()).text === `${savedText} for this checkout` && readFileSync(presetPath, "utf8") === savedText && fresh.editors.at(-1)!.includes("replace session guidance"));
 	fresh.controls.confirm = false;
-	await fresh.command("guidance save pr-review");
+	await fresh.command("guidance save");
 	await fresh.command("guidance delete pr-review");
 	check("overwriting and deletion require confirmation", readFileSync(presetPath, "utf8") === savedText);
 	fresh.controls.editor = async () => undefined;
@@ -160,6 +162,14 @@ try {
 	await fresh.command("guidance load missing");
 	await fresh.command("guidance save ../escape");
 	check("missing and invalid presets do not change guidance", (await fresh.policy()).revision === 1 && fresh.notices.at(-1)!.includes("Preset names"));
+	fresh.controls.confirm = true;
+	await fresh.command("guidance save");
+	check("unnamed save replaces the last loaded preset after confirmation despite failed or cancelled loads",
+		readFileSync(presetPath, "utf8") === `${savedText} for this checkout`);
+	writeFileSync(presetPath, savedText);
+	await fresh.start();
+	await fresh.command("guidance save");
+	check("session start forgets the save target even with restored guidance", fresh.notices.at(-1)!.startsWith("Usage:"));
 	fresh.controls.editor = async (prefill) => prefill;
 	fresh.controls.choice = "Approve once + load guidance preset…";
 	fresh.controls.evaluate = async () => verdict("review");
