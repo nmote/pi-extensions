@@ -7,7 +7,7 @@ Controls tool permissions using explicit rules, human approval, or a background-
 - `/auto` — Show the mode, evaluator backend, effort, and policy settings.
   - `/auto manual|auto|yolo` — Choose prompting, model evaluation, or automatic permission for unmatched calls; deny rules always apply.
   - `/auto guidance [clear]` — View/edit session evaluator guidance, or clear it.
-  - `/auto guidance save [name]` — Save current guidance as a global preset, defaulting to the last preset loaded this session; confirm before overwriting.
+  - `/auto guidance save [name]` — Save current guidance as a global preset, defaulting to the preset most recently saved or loaded this session; confirm before overwriting.
   - `/auto guidance load [name]` — Fuzzy-search preset names in the TUI (plain selection over RPC), or supply a name, then review/edit before replacing session guidance.
   - `/auto guidance delete <name>` — Delete a preset after confirmation; active session guidance is unchanged.
   - `/auto effort [low|medium|high]` — Pick or set evaluator reasoning effort (`evaluator.reasoningEffort` in configuration; applies to chat, including Jev fallback).

@@ -139,7 +139,7 @@ try {
 	await presets.command("guidance");
 	await presets.command("guidance save pr-review");
 	await presets.command("guidance save");
-	check("saving without a name requires a load, not just a save", presets.notices.at(-1)!.startsWith("Usage:"));
+	check("unnamed save defaults to the last saved preset without a load", presets.notices.at(-1) === "Saved guidance preset pr-review");
 	const presetPath = join(temp, "extensions/auto-approve-guidance/pr-review.txt");
 	const savedText = readFileSync(presetPath, "utf8");
 	check("saving creates private global storage without changing session guidance",
@@ -148,6 +148,8 @@ try {
 	const fresh = harness();
 	await fresh.start();
 	check("presets are not activated in new sessions", (await fresh.policy()).text === "");
+	await fresh.command("guidance save");
+	check("unnamed save requires a save or load in the current session", fresh.notices.at(-1) === "Usage: /auto guidance [clear|save <name>|load [name]|delete <name>]");
 	fresh.controls.editor = async (prefill) => `${prefill} for this checkout`;
 	await fresh.command("guidance load pr-review");
 	check("loading reviews a copy and leaves the saved preset unchanged",
@@ -166,6 +168,17 @@ try {
 	await fresh.command("guidance save");
 	check("unnamed save replaces the last loaded preset after confirmation despite failed or cancelled loads",
 		readFileSync(presetPath, "utf8") === `${savedText} for this checkout`);
+	await fresh.command("guidance save alternate");
+	fresh.controls.confirm = false;
+	await fresh.command("guidance save pr-review");
+	fresh.controls.confirm = true;
+	await fresh.command("guidance save");
+	check("a later save supersedes a load and cancelled saves preserve the target", fresh.notices.at(-1) === "Saved guidance preset alternate");
+	fresh.controls.editor = async (prefill) => prefill;
+	await fresh.command("guidance load pr-review");
+	await fresh.command("guidance save");
+	check("a later load supersedes a save", fresh.notices.at(-1) === "Saved guidance preset pr-review");
+	await fresh.command("guidance delete alternate");
 	writeFileSync(presetPath, savedText);
 	await fresh.start();
 	await fresh.command("guidance save");
@@ -201,7 +214,7 @@ try {
 	await fresh.command("guidance delete pr-review");
 	check("deleting a preset does not revoke the session copy", (await fresh.policy()).text === savedText);
 	await fresh.command("guidance load");
-	check("an empty preset picker leaves active guidance alone", fresh.notices.at(-1)!.includes("No guidance presets saved") && (await fresh.policy()).revision === 2);
+	check("an empty preset picker leaves active guidance alone", fresh.notices.at(-1)!.includes("No guidance presets saved") && (await fresh.policy()).revision === 3);
 
 	const root = harness();
 	await root.start();

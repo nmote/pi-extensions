@@ -165,7 +165,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 	const approvalQueue = new ApprovalQueue();
 	let stats = emptyStats();
 	let guidance: ApprovalGuidance = { text: "", revision: 0 };
-	let lastLoadedPreset: string | undefined;
+	let lastUsedPreset: string | undefined;
 
 	function adoptGuidance(next: ApprovalGuidance, ctx: ExtensionContext): void {
 		if (next.revision !== guidance.revision || next.text !== guidance.text) evaluatorCache.clear();
@@ -238,7 +238,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			const edit = await collectGuidance(ctx, signal, preset);
 			if (edit) {
 				await exchangeGuidance(edit, ctx);
-				if (edit.presetName) lastLoadedPreset = edit.presetName;
+				if (edit.presetName) lastUsedPreset = edit.presetName;
 			}
 		} catch (error) {
 			ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
@@ -266,7 +266,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				// Intermediate parents forward the edit without authorizing a cancelled descendant.
 				if (forward) return JSON.stringify(edit);
 				await exchangeGuidance(edit, dialogCtx);
-				if ("presetName" in edit && typeof edit.presetName === "string") lastLoadedPreset = edit.presetName;
+				if ("presetName" in edit && typeof edit.presetName === "string") lastUsedPreset = edit.presetName;
 				return "Approve once";
 			} catch (error) {
 				ctx.ui.notify(`Auto-approve: ${error instanceof Error ? error.message : error}`, "warning");
@@ -836,7 +836,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 			if (trimmed === "guidance" || trimmed.startsWith("guidance ")) {
 				const match = /^guidance(?: (clear|save|load|delete)(?: ([^\s]+))?)?$/.exec(trimmed);
 				const action = match?.[1];
-				const name = match?.[2] ?? (action === "save" ? lastLoadedPreset : undefined);
+				const name = match?.[2] ?? (action === "save" ? lastUsedPreset : undefined);
 				if (!match || ((action === "save" || action === "delete") && !name) || (action === "clear" && name)) {
 					ctx.ui.notify("Usage: /auto guidance [clear|save <name>|load [name]|delete <name>]", "warning");
 					return;
@@ -863,6 +863,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 								if (listGuidancePresets().includes(name!) && !await ctx.ui.confirm(tagApprovalTitle(`Overwrite guidance preset ${name}?`), "Replace the saved preset with current session guidance.", { signal })) return undefined;
 								if (!signal.aborted) {
 									saveGuidancePreset(name!, current.text);
+									lastUsedPreset = name;
 									ctx.ui.notify(`Saved guidance preset ${name}`, "info");
 								}
 							} else if (!signal.aborted) {
@@ -1014,7 +1015,7 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		}>;
 		mode = config.defaultMode;
 		guidance = { text: "", revision: 0 };
-		lastLoadedPreset = undefined;
+		lastUsedPreset = undefined;
 		alwaysAllow.clear();
 		humanDenied.clear();
 		evaluatorCache.clear();
