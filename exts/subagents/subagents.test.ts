@@ -149,6 +149,7 @@ try {
 	const definitions = join(agentDir, "test-agents");
 	await mkdir(definitions);
 	await writeFile(join(definitions, "correctness-reviewer.md"), "---\nname: correctness-reviewer\ndescription: Inspect correctness\ntools: Read, Bash, Grep, Glob\n---\nReview the given code.\n");
+	await writeFile(join(definitions, "mcp-reader.md"), "---\nname: mcp-reader\ndescription: Inspect MCP data\ntools: Read, MCP\n---\nInspect data.\n");
 	await writeFile(join(agentDir, "extensions/agent-config.json"), JSON.stringify({ agents: "../test-agents" }));
 	const discovery = discoverNamedAgents();
 	const namedAgents = ["correctness-reviewer"];
@@ -407,6 +408,21 @@ try {
 			identityStyles,
 		) === "subagent 2 parallel tasks\n  simplicity-reviewer · Simplify code\n  general",
 	);
+
+	const mcpReader = resolveSubagentTask(
+		{ task: "recall mcp", agent: "mcp-reader" },
+		{ cwd: process.cwd() },
+		discovery.agents,
+	);
+	check("MCP grant maps to tool_search", mcpReader.tools?.join(",") === "read,tool_search,ask_supervisor");
+	for (const launchTask of [task("recall general"), { ...reviewer, task: "recall reviewer" }, { ...unrestricted, task: "recall unrestricted" }, mcpReader]) {
+		const manager = makeManager();
+		const [result] = await manager.start([launchTask], process.cwd(), context());
+		const { args } = JSON.parse(result.output!);
+		const enabled = launchTask === mcpReader;
+		check(`MCP launch policy for ${launchTask.agent}`, args.includes("--no-mcp") === !enabled && (!enabled || args[args.indexOf("--tools") + 1] === "read,tool_search,ask_supervisor"));
+		await manager.cancel();
+	}
 
 	const simple = makeManager();
 	let sameDirectoryApprovalCalls = 0;

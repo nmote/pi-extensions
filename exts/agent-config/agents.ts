@@ -22,6 +22,7 @@ const TOOL_ALIASES: Record<string, string[]> = {
 	Edit: ["edit"],
 	Glob: ["find", "ls"],
 	Grep: ["grep"],
+	MCP: ["tool_search"],
 	Read: ["read"],
 	WebFetch: ["web_fetch"],
 	Write: ["write"],

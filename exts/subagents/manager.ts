@@ -655,6 +655,7 @@ class SubagentRun {
 		if (this.task.model) args.push("--model", this.task.model);
 		if (this.task.thinkingLevel) args.push("--thinking", this.task.thinkingLevel);
 		if (this.task.tools) args.push("--tools", this.task.tools.join(","));
+		if (!this.task.tools?.includes("tool_search")) args.push("--no-mcp");
 		if (this.task.autoApproveMode) args.push("--auto", this.task.autoApproveMode);
 		if (this.promptDir) args.push("--append-system-prompt", join(this.promptDir, "prompt.md"));
 		return args;
