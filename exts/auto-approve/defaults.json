@@ -2,6 +2,7 @@
   "defaultMode": "auto",
   "allow": [
     { "tool": "backlog", "description": "Persistent backlog; writes only its own store" },
+    { "tool": "cloud_agent", "description": "Dispatch an explicitly requested, approved plan to a cloud agent" },
     { "tool": "cloud_agent_status", "description": "Read-only: cloud agent status" },
     { "tool": "cloud_agent_apply", "description": "Apply a Codex diff only to a clean Git worktree; no commit, push, or PR" },
     { "tool": "list_models", "description": "Read-only: enumerate available models" },
