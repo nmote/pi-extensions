@@ -1,5 +1,5 @@
 /**
- * Preferred subagent models for routine, basic, and complex tasks.
+ * Preferred subagent models for routine and complex tasks.
  *
  * The choice lives at ~/.pi/agent/extensions/subagent-models.json and is
  * managed by /subagent-models. Consumers read it only to build advisory
@@ -19,7 +19,7 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
 	return THINKING_LEVELS.some((level) => level === value);
 }
 
-export type SubagentModelSlot = "routine" | "basic" | "complex";
+export type SubagentModelSlot = "routine" | "complex";
 
 export interface SubagentModelRef {
 	provider: string;
@@ -29,7 +29,6 @@ export interface SubagentModelRef {
 
 export interface SubagentModelsConfig {
 	routine?: SubagentModelRef;
-	basic?: SubagentModelRef;
 	complex?: SubagentModelRef;
 }
 
@@ -56,7 +55,6 @@ export function loadSubagentModels(path = configPath()): SubagentModelsConfig {
 		const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 		return {
 			routine: parseRef(raw.routine),
-			basic: parseRef(raw.basic),
 			complex: parseRef(raw.complex),
 		};
 	} catch (error) {
@@ -114,16 +112,13 @@ export interface SubagentModelPolicy {
 /** Build advisory model guidance from the saved preferences. */
 export function describeSubagentModelPolicy(config: SubagentModelsConfig): SubagentModelPolicy {
 	const routine = config.routine ? formatModelRef(config.routine) : "the session model";
-	const basic = config.basic ? formatModelRef(config.basic) : "the session model";
 	const complex = config.complex ? formatModelRef(config.complex) : "the session model (omit model)";
 	return {
 		text:
-			`Preferred subagent models (advisory, not binding): basic tasks -> ${basic}; ` +
-			`routine tasks -> ${routine}; complex tasks -> ${complex}. ` +
+			`Preferred subagent models (advisory, not binding): routine tasks -> ${routine}; complex tasks -> ${complex}. ` +
 			"Pass the recommended thinkingLevel explicitly when it fits. An explicit user request for a model or thinking level always overrides these.",
 		guidelines: [
-			`Prefer the user's subagent model preferences when they fit: basic tasks -> ${basic}, ` +
-				`routine tasks -> ${routine}, complex tasks -> ${complex}. ` +
+			`Prefer the user's subagent model preferences when they fit: routine tasks -> ${routine}, complex tasks -> ${complex}. ` +
 				"These are advisory; pass the recommended thinkingLevel explicitly when it fits, and honor an explicit user request for a model or thinking level first.",
 		],
 	};

@@ -55,20 +55,17 @@ async function main(): Promise<void> {
 	const temp = mkdtempSync(join(tmpdir(), "subagent-models-test-"));
 	try {
 		const path = join(temp, "subagent-models.json");
-		check("config has no default slots", loadSubagentModels(path).routine === undefined && loadSubagentModels(path).basic === undefined && loadSubagentModels(path).complex === undefined);
+		check("config has no default slots", loadSubagentModels(path).routine === undefined && loadSubagentModels(path).complex === undefined);
 
 		saveSubagentModel("routine", "anthropic", "claude-haiku-4-5", path);
 		const saved = loadSubagentModels(path);
 		check("routine slot persists", saved.routine?.provider === "anthropic" && saved.routine?.model === "claude-haiku-4-5");
-		check("basic slot is untouched", saved.basic === undefined);
 
-		saveSubagentModel("basic", "openrouter", "openai/gpt-4.1-mini", path);
-		const both = loadSubagentModels(path);
-		check("saving a second slot preserves the first", both.routine?.model === "claude-haiku-4-5" && both.basic?.model === "openai/gpt-4.1-mini");
-
+		writeFileSync(path, JSON.stringify({ ...saved, basic: { provider: "test", model: "legacy" } }));
+		check("legacy basic preference is ignored", !("basic" in loadSubagentModels(path)));
 		saveSubagentModel("complex", "test", "reasoning", path);
-		const all = loadSubagentModels(path);
-		check("complex slot persists alongside existing slots", all.complex?.model === "reasoning" && all.basic?.model === "openai/gpt-4.1-mini" && all.routine?.model === "claude-haiku-4-5");
+		const both = loadSubagentModels(path);
+		check("saving a second slot preserves the first", both.complex?.model === "reasoning" && both.routine?.model === "claude-haiku-4-5");
 
 		saveSubagentEffort("complex", "off", path);
 		check("effort off persists", loadSubagentModels(path).complex?.thinkingLevel === "off");
@@ -82,13 +79,13 @@ async function main(): Promise<void> {
 		saveSubagentEffort("complex", "high", path);
 		clearSubagentModel("complex", path);
 		const cleared = loadSubagentModels(path);
-		check("clear removes only the complex slot", cleared.complex === undefined && cleared.routine?.model === "claude-haiku-4-5" && cleared.basic?.model === "openai/gpt-4.1-mini");
+		check("clear removes only the complex slot", cleared.complex === undefined && cleared.routine?.model === "claude-haiku-4-5");
 
 		check("saved config is readable JSON", JSON.parse(readFileSync(path, "utf8")) !== null);
 
-		writeFileSync(path, JSON.stringify({ routine: { provider: 1 }, basic: false, complex: { model: "missing-provider" } }));
+		writeFileSync(path, JSON.stringify({ routine: { provider: 1 }, complex: { model: "missing-provider" } }));
 		const invalid = loadSubagentModels(path);
-		check("invalid config fields are ignored", invalid.routine === undefined && invalid.basic === undefined && invalid.complex === undefined);
+		check("invalid config fields are ignored", invalid.routine === undefined && invalid.complex === undefined);
 	} finally {
 		rmSync(temp, { recursive: true, force: true });
 	}
@@ -96,12 +93,12 @@ async function main(): Promise<void> {
 	check("formatModelRef joins provider and model", formatModelRef({ provider: "test", model: "tiny" }) === "test/tiny");
 
 	const none = describeSubagentModelPolicy({});
-	check("unset slots fall back to the session model", none.text.includes("routine tasks -> the session model") && none.text.includes("basic tasks -> the session model") && none.text.includes("complex tasks -> the session model (omit model)"));
+	check("unset slots fall back to the session model", none.text.includes("routine tasks -> the session model") && none.text.includes("complex tasks -> the session model (omit model)"));
 	check("policy states it is advisory", none.text.includes("advisory") && none.guidelines[0].includes("advisory"));
 	check("policy mentions explicit user requests", none.text.includes("explicit user request"));
 
 	const configured = describeSubagentModelPolicy({ routine: { provider: "test", model: "tiny" } });
-	check("configured slots replace the session model", configured.text.includes("routine tasks -> test/tiny") && configured.text.includes("basic tasks -> the session model"));
+	check("configured slots replace the session model", configured.text.includes("routine tasks -> test/tiny"));
 	check("complex tasks use the session model when unset", configured.text.includes("complex tasks -> the session model (omit model)"));
 	const complexPolicy = describeSubagentModelPolicy({ complex: { provider: "test", model: "reasoning" } });
 	check("complex preference appears in both policy surfaces with an explicit-user override", complexPolicy.text.includes("complex tasks -> test/reasoning") && complexPolicy.guidelines[0].includes("complex tasks -> test/reasoning") && complexPolicy.guidelines[0].includes("explicit user request"));
@@ -149,7 +146,7 @@ async function main(): Promise<void> {
 		check("effort command persists and refreshes both policy surfaces", loadSubagentModels().complex?.thinkingLevel === "medium" && tools.get("subagent")?.description.includes("test/tiny (thinkingLevel: medium)") && tools.get("subagent")?.promptGuidelines.some((line: string) => line.includes("test/tiny (thinkingLevel: medium)")));
 		await command.handler("", picker.ctx);
 		check("summary displays effort", picker.notifications.at(-1)?.message.includes("test/tiny (thinkingLevel: medium)") === true);
-		for (const args of ["complex effort", "complex effort invalid", "complex effort high extra", "complex clear extra"]) {
+		for (const args of ["basic", "basic clear", "basic effort high", "complex effort", "complex effort invalid", "complex effort high extra", "complex clear extra"]) {
 			await command.handler(args, picker.ctx);
 			check(`rejects malformed command: ${args}`, picker.notifications.at(-1)?.level === "error" && loadSubagentModels().complex?.thinkingLevel === "medium");
 		}

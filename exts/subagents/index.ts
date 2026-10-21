@@ -526,18 +526,16 @@ export default function subagents(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("subagent-models", {
-		description: "Show or set preferred subagent models and effort for routine, basic, and complex tasks",
+		description: "Show or set preferred subagent models and effort for routine and complex tasks",
 		handler: async (args, ctx) => {
 			const [slotRaw, action, level, ...extra] = (args ?? "").trim().split(/\s+/);
-			const usage = "usage: /subagent-models [basic|routine|complex [clear|effort <level|clear>]]";
+			const usage = "usage: /subagent-models [routine|complex [clear|effort <level|clear>]]";
 			if (!slotRaw) {
 				const config = loadSubagentModels();
 				const routine = config.routine ? formatModelRef(config.routine) : "not set (session model)";
-				const basic = config.basic ? formatModelRef(config.basic) : "not set (session model)";
 				const complex = config.complex ? formatModelRef(config.complex) : "not set (session model)";
 				ctx.ui.notify(
 					[
-						`Basic subagent model: ${basic}`,
 						`Routine subagent model: ${routine}`,
 						`Complex subagent model: ${complex}`,
 						"Use /subagent-models <tier> to pick a model, <tier> clear to unset, or <tier> effort <level|clear> to set or clear effort.",
@@ -546,7 +544,7 @@ export default function subagents(pi: ExtensionAPI): void {
 				);
 				return;
 			}
-			if ((slotRaw !== "routine" && slotRaw !== "basic" && slotRaw !== "complex") || extra.length > 0 || (action !== "effort" && level !== undefined)) {
+			if ((slotRaw !== "routine" && slotRaw !== "complex") || extra.length > 0 || (action !== "effort" && level !== undefined)) {
 				ctx.ui.notify(usage, "error");
 				return;
 			}

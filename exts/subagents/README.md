@@ -5,7 +5,7 @@ Delegates focused work to isolated Pi children that can ask their parent for gui
 ## Slash commands
 
 - `/subagents` — Show child status and named-agent discovery errors; `/subagents cancel <id|all>` ends children.
-- `/subagent-models [basic|routine|complex [clear|effort <level|clear>]]` — Show preferences, pick a model for a task tier, or clear that tier. Use `effort <level>` to set its thinking-level recommendation and `effort clear` to remove only that recommendation. Levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set a model before setting effort; changing the model preserves effort. Unset tiers inherit the session model.
+- `/subagent-models [routine|complex [clear|effort <level|clear>]]` — Show preferences, pick a model for a task tier, or clear that tier. Use `effort <level>` to set its thinking-level recommendation and `effort clear` to remove only that recommendation. Levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set a model before setting effort; changing the model preserves effort. Unset tiers inherit the session model.
 - `/_subagent-task` — Internal child-only approval-policy update; not for manual use.
 - `/_subagent-handshake` — Internal child-only protocol check; not for manual use.
 
