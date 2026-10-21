@@ -13,6 +13,10 @@ Tracks repository-labeled work across sessions, with parent/child plans, depende
 
 Setting a child to `approved`, `in_progress`, or `done` automatically moves every `open` ancestor to `in_progress` and logs the triggering descendant. Other ancestor statuses are preserved. This tracks progress without approving additional work. Parent completion remains manual; the tool prompts a Done-criteria check when all children are `done` or `dropped`.
 
+## Repository labels
+
+Worktrees share their main repository's label. Local filesystem remotes (paths or `file://` URLs) are followed recursively; network and invalid targets are ignored. All local remotes must converge on one repository. A cycle, conflicting destinations, or the 100-repository traversal limit falls back to the original shared worktree root. Existing item labels are not migrated.
+
 ## Storage and graphs
 
 Items live under `<agent-dir>/backlog` by default; `PI_BACKLOG_DIR` overrides it. `<agent-dir>` defaults to `~/.pi/agent`, or `PI_CODING_AGENT_DIR`.
