@@ -17,6 +17,7 @@ const PI_PROVIDED = new Set([
 	"@earendil-works/pi-agent-core",
 	"@earendil-works/pi-ai",
 	"@earendil-works/pi-ai/compat",
+	"@earendil-works/pi-ai/models",
 	"@earendil-works/pi-ai/oauth",
 	"@earendil-works/pi-ai/providers/all",
 	"@earendil-works/pi-coding-agent",

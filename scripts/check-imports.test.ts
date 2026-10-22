@@ -27,7 +27,12 @@ check(
 
 const dependencies = ["@example/library"];
 check("allows declared dependency subpaths", isAllowedSpecifier("@example/library/subpath", dependencies));
-check("allows Pi-provided modules", isAllowedSpecifier("@earendil-works/pi-ai/oauth", dependencies));
+check(
+	"allows Pi-provided modules",
+	["@earendil-works/pi-ai/oauth", "@earendil-works/pi-ai/models"].every((specifier) =>
+		isAllowedSpecifier(specifier, dependencies),
+	),
+);
 check("allows Node built-ins", isAllowedSpecifier("node:fs", dependencies) && isAllowedSpecifier("fs", dependencies));
 check("rejects Pi internals", !isAllowedSpecifier("@earendil-works/pi-ai/bun-oauth", dependencies));
 check("rejects transitive dev packages", !isAllowedSpecifier("proper-lockfile", dependencies));
