@@ -341,7 +341,7 @@ class SubagentRun {
 	}
 
 	private recoveryBlockedReason(): string | undefined {
-		if (this.status !== "failed") return undefined;
+		if (this.status !== "failed" && this.status !== "cancelled") return undefined;
 		if (this.failureKind === "protocol" || this.failureKind === "policy") {
 			return `Subagent ${this.id} failed with ${this.failureKind} and cannot be recovered`;
 		}
@@ -364,7 +364,7 @@ class SubagentRun {
 	}
 
 	isRecoverable(): boolean {
-		return this.status === "failed" && !this.recoveryBlockedReason();
+		return (this.status === "failed" || this.status === "cancelled") && !this.recoveryBlockedReason();
 	}
 
 	assertCanContinue(): void {
@@ -372,7 +372,7 @@ class SubagentRun {
 			throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}${this.failureKind ? ` (${this.failureKind})` : ""}`);
 		}
 		if (this.status === "idle") return;
-		if (this.status === "failed") {
+		if (this.status === "failed" || this.status === "cancelled") {
 			const blocked = this.recoveryBlockedReason();
 			if (blocked) throw new Error(`Subagent ${this.id} cannot accept a task while ${this.status}${this.failureKind ? ` (${this.failureKind})` : ""}: ${blocked}`);
 			return;
@@ -450,8 +450,8 @@ class SubagentRun {
 	async continue(task: string, getAutoApproveMode: () => string, hooks: OperationHooks): Promise<SubagentSnapshot> {
 		this.assertCanContinue();
 		if (!task.trim()) throw new Error("Subagent task must not be blank");
-		const recovering = this.status === "failed";
-		if (recovering) this.previousFailure = { kind: (this.failureKind ?? "process") as FailureKind, message: this.error! };
+		const recovering = this.status === "failed" || this.status === "cancelled";
+		if (recovering) this.previousFailure = { kind: this.failureKind ?? (this.status === "cancelled" ? "aborted" : "process"), message: this.error ?? "Previous attempt interrupted" };
 		this.setStatus("running");
 		this.preparingTask = true;
 		this.hooks = hooks;
@@ -604,16 +604,20 @@ class SubagentRun {
 			this.taskEndedAt ??= Date.now();
 			this.setStatus("cancelled");
 			this.error = "Cancelled by supervisor";
-			this.failureKind = undefined;
 			this.setPhase("cancelled");
 			this.pendingQuestion = undefined;
 			this.restoredQuestion = undefined;
+			const rpc = this.rpc;
+			this.rpc = undefined;
+			this.cleanup = this.cleanup.then(async () => {
+				await rpc?.stop();
+				await rpc?.flushEvents();
+				await this.cleanupPrompt();
+			});
 			this.settleCheckpoint();
 			this.onStateChange();
 		}
 		await this.cleanup;
-		await this.rpc?.stop();
-		await this.cleanupPrompt();
 		return this.snapshot();
 	}
 
@@ -1049,7 +1053,7 @@ export class SubagentManager {
 	async cancel(id?: string): Promise<SubagentSnapshot[]> {
 		const runs = id ? [this.requireRun(id)] : [...this.runs.values()].filter((run) => {
 			const snapshot = run.snapshot();
-			return !TERMINAL_STATUSES.has(snapshot.status) || !!snapshot.recoverable;
+			return !TERMINAL_STATUSES.has(snapshot.status) || (snapshot.status === "failed" && !!snapshot.recoverable);
 		});
 		return Promise.all(runs.map((run) => run.cancel()));
 	}

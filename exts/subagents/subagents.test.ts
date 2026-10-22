@@ -321,7 +321,8 @@ try {
 		await runtime.shutdown();
 		runtime = register(entries);
 		runtime.beginSession(ctx as unknown as ExtensionContext);
-		check("cancellation stays permanent after restoration", (await errorMessage(runtime.tools.get("subagent_continue").execute("continue", { id: persistentId, task: "wrong" }, undefined, undefined, ctx))).includes("while cancelled"));
+		const resumedCancellation = await runtime.tools.get("subagent_continue").execute("continue", { id: persistentId, task: "recall after cancellation" }, undefined, undefined, ctx);
+		check("cancelled children recover after restoration with retained history", resumedCancellation.details.results[0].status === "idle" && JSON.parse(resumedCancellation.details.results[0].output).history[0].text === "Task: recall persistent");
 
 		const stale = await runtime.tools.get("subagent").execute("stale", { task: "done" }, undefined, undefined, ctx);
 		const staleId = stale.details.results[0].id;
@@ -479,7 +480,9 @@ try {
 	followupAbort.abort();
 	check("simultaneous assignment rejects without replacing active task", busyContinue.includes("while running") && (await busy).status === "cancelled");
 	check("active cancellation removes the live count", reusable.liveCount() === 0 && liveCounts.join(",") === "1,0");
-	check("ended child cannot be reused", (await errorMessage(reusable.continue(firstTask.id, "wrong", () => "manual", context()))).includes("while cancelled"));
+	const resumedTask = await reusable.continue(firstTask.id, "recall after escape", () => "manual", context());
+	const resumedInfo = JSON.parse(resumedTask.output!);
+	check("cancelled active child reopens with history, current policy and interruption warning", resumedTask.status === "idle" && resumedInfo.pid !== firstRecall.pid && resumedInfo.mode === "manual" && resumedInfo.history[0].text === "Task: recall first secret" && resumedInfo.history.at(-1).text.includes("Inspect existing state before repeating consequential actions") && resumedTask.previousFailure?.kind === "aborted");
 
 	const failedAgent = makeManager();
 	const failedTask = (await failedAgent.start([task("fail slow cleanup")], process.cwd(), context()))[0]!;
@@ -539,7 +542,8 @@ try {
 	const recoveryAbort = new AbortController();
 	const cancelledRecovery = cancelRecovery.continue(cancelFailure.id, "must not run", () => "manual", context(), undefined, recoveryAbort.signal);
 	recoveryAbort.abort();
-	check("cancellation during cleanup prevents reopening or model execution", (await cancelledRecovery).status === "cancelled" && cancelRecovery.status(cancelFailure.id)[0].usage.totalTokens === 0 && (await errorMessage(cancelRecovery.continue(cancelFailure.id, "wrong", () => "manual", context()))).includes("while cancelled"));
+	check("cancellation during cleanup prevents reopening or model execution", (await cancelledRecovery).status === "cancelled" && cancelRecovery.status(cancelFailure.id)[0].usage.totalTokens === 0 && cancelRecovery.status(cancelFailure.id)[0].recoverable === true);
+	check("cancelled recovery can be continued explicitly", (await cancelRecovery.continue(cancelFailure.id, "recall retry", () => "manual", context())).status === "idle");
 	const missingRecovery = makeManager();
 	const missingFailure = (await missingRecovery.start([task("fail")], process.cwd(), context()))[0]!;
 	const missingState = missingRecovery.persistedState();
@@ -548,10 +552,12 @@ try {
 	const missingRestored = makeManager();
 	missingRestored.restore(missingState);
 	check("missing failed sessions cannot silently start fresh", !missingRestored.status(missingFailure.id)[0].recoverable && (await errorMessage(missingRestored.continue(missingFailure.id, "wrong", () => "manual", context()))).includes("Saved session"));
+	await missingRestored.cancel(missingFailure.id);
+	check("cancelled children with missing sessions cannot start fresh", !missingRestored.status(missingFailure.id)[0].recoverable && (await errorMessage(missingRestored.continue(missingFailure.id, "wrong", () => "manual", context()))).includes("Saved session"));
 	const cancelFailed = makeManager();
 	const cancellable = (await cancelFailed.start([task("fail")], process.cwd(), context()))[0]!;
 	await cancelFailed.cancel();
-	check("cancelling failed children permanently disables recovery", cancelFailed.status(cancellable.id)[0].status === "cancelled" && (await errorMessage(cancelFailed.continue(cancellable.id, "wrong", () => "manual", context()))).includes("while cancelled"));
+	check("cancelling failed children retains recovery eligibility", cancelFailed.status(cancellable.id)[0].status === "cancelled" && cancelFailed.status(cancellable.id)[0].recoverable === true);
 
 	const abortedAgent = makeManager();
 	const abortedSettlement = (await abortedAgent.start([task("abort settlement")], process.cwd(), context()))[0]!;
@@ -584,6 +590,8 @@ try {
 	const policyTask = (await missingPolicy.start([task("no policy")], process.cwd(), context()))[0]!;
 	const noAck = await missingPolicy.continue(policyTask.id, "recall", () => "manual", context());
 	check("missing policy acknowledgement fails closed", noAck.status === "failed" && noAck.failureKind === "policy" && !noAck.recoverable && !!noAck.error?.includes("not acknowledged") && noAck.output === undefined);
+	await missingPolicy.cancel(policyTask.id);
+	check("cancellation cannot bypass approval-policy failures", !missingPolicy.status(policyTask.id)[0].recoverable && (await errorMessage(missingPolicy.continue(policyTask.id, "wrong", () => "manual", context()))).includes("cannot be recovered"));
 	const recoveryPolicy = makeManager();
 	const policyFailure = (await recoveryPolicy.start([task("fail")], process.cwd(), context()))[0]!;
 	const previousPolicy = process.env.FAKE_POLICY;
