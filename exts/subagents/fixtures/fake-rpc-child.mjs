@@ -13,6 +13,8 @@ let acknowledgePolicy = process.env.FAKE_POLICY !== "no-ack";
 let slowDiscovery = false;
 let slowPolicy = false;
 let straySettlement = false;
+let contextTokens = 60_000;
+let contextStatsAvailable = true;
 const history = existsSync(sessionFile) ? JSON.parse(readFileSync(sessionFile, "utf8").trim().split("\n")[1]).data : [];
 
 let terminalError;
@@ -66,6 +68,12 @@ function processLine(line) {
 		send({ id: command.id, type: "response", command: "get_state", success: true, data: { model: { provider: "fake", id: "fake-model" } } });
 		return;
 	}
+	if (command.type === "get_session_stats") {
+		send({ id: command.id, type: "response", command: command.type, success: contextStatsAvailable,
+			data: { contextUsage: { tokens: contextTokens, contextWindow: 200_000, percent: contextTokens === null ? null : contextTokens / 2_000 } },
+			error: contextStatsAvailable ? undefined : "stats unavailable" });
+		return;
+	}
 	if (command.type === "get_commands") {
 		const respond = () => send({ id: command.id, type: "response", command: "get_commands", success: true, data: { commands: [{ name: "_subagent-task" }, ...(process.env.FAKE_PROTOCOL === "legacy" ? [] : [{ name: "_subagent-handshake" }])] } });
 		if (slowDiscovery) {
@@ -101,6 +109,7 @@ function processLine(line) {
 		if (command.message.includes("slow discovery")) slowDiscovery = true;
 		if (command.message.includes("slow policy")) slowPolicy = true;
 		if (command.message.includes("stray settlement")) straySettlement = true;
+		contextStatsAvailable = command.message !== "Task: no context stats";
 		terminalError = undefined;
 		history.push({ role: "user", text: command.message });
 		persist();
@@ -126,8 +135,11 @@ function processLine(line) {
 		}
 		if (command.message.startsWith("Task: compact")) {
 			send({ type: "compaction_start", reason: "threshold" });
+			contextTokens = null;
 			send({ type: "compaction_end", result: { usage: assistant("").usage }, aborted: false });
-			finish("compacted");
+			pending = "compaction";
+			send({ type: "extension_ui_request", id: "compaction-1", method: "editor",
+				title: `[[pi-subagent-question:${token}]]`, prefill: JSON.stringify({ question: "Resume after compaction?" }) });
 			return;
 		}
 		if (command.message.startsWith("Task: abort settlement")) {
@@ -261,7 +273,10 @@ function processLine(line) {
 			} else finish(command.value ?? "cancelled");
 			return;
 		}
-		if (pending === "question") finish(`answer: ${command.value ?? "cancelled"}`);
+		if (pending === "compaction") {
+			contextTokens = 20_000;
+			finish("compacted");
+		} else if (pending === "question") finish(`answer: ${command.value ?? "cancelled"}`);
 		else if (pending === "approval") {
 			if (typeof command.value === "string" && command.value.startsWith("Approve")) {
 				reportAutoApproveStat("humanApprovals");

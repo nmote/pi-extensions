@@ -50,6 +50,10 @@ const schema = Type.Object({
 			previousFailure: Type.Optional(Type.Object({ kind: failureKind, message: Type.String() })),
 			sessionFile: Type.Optional(Type.String()), recoverable: Type.Optional(Type.Boolean()),
 			activity: Type.Array(Type.Object({ at: count, message: Type.String() })),
+			contextUsage: Type.Optional(Type.Object({
+				tokens: Type.Union([count, Type.Null()]), contextWindow: count,
+				percent: Type.Union([count, Type.Null()]),
+			})),
 			usage, totalUsage: usage,
 		}),
 	})),

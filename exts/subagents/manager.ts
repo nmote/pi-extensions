@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { getAgentDir, SessionManager, type ExtensionContext, type RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager, type ContextUsage, type ExtensionContext, type RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import {
 	type AutoApproveStat,
 	isQuestionTitle,
@@ -95,6 +95,7 @@ export interface SubagentSnapshot {
 	sessionFile?: string;
 	recoverable?: boolean;
 	activity: SubagentActivity[];
+	contextUsage?: ContextUsage;
 	usage: UsageTotals;
 	totalUsage: UsageTotals;
 }
@@ -271,6 +272,7 @@ class SubagentRun {
 	private previousFailure?: { kind: FailureKind; message: string };
 	private lastAssistant?: Record<string, any>;
 	private readonly activity: SubagentActivity[] = [];
+	private contextUsage?: ContextUsage;
 	private usage = emptyUsage();
 	private readonly totalUsage = emptyUsage();
 	private accountedUsage = emptyUsage();
@@ -300,6 +302,7 @@ class SubagentRun {
 			this.error = state.snapshot.error;
 			this.failureKind = state.snapshot.failureKind;
 			this.previousFailure = state.snapshot.previousFailure;
+			this.contextUsage = structuredClone(state.snapshot.contextUsage);
 			this.usage = structuredClone(state.snapshot.usage);
 			Object.assign(this.totalUsage, structuredClone(state.snapshot.totalUsage));
 			this.accountedUsage = structuredClone(state.accountedUsage);
@@ -403,6 +406,7 @@ class SubagentRun {
 			sessionFile,
 			recoverable: this.isRecoverable(),
 			activity: this.activity.map((entry) => ({ ...entry })),
+			contextUsage: structuredClone(this.contextUsage),
 			usage: structuredClone(this.usage),
 			totalUsage: structuredClone(this.totalUsage),
 		};
@@ -718,6 +722,17 @@ class SubagentRun {
 		this.hooks?.onUpdate?.();
 	}
 
+	private async refreshContextUsage(): Promise<void> {
+		const rpc = this.rpc;
+		if (!rpc) return;
+		try {
+			const response = await rpc.send({ type: "get_session_stats" });
+			if (this.rpc === rpc && !this.isStopped()) this.contextUsage = response.data?.contextUsage;
+		} catch {
+			if (this.rpc === rpc) this.contextUsage = undefined;
+		}
+	}
+
 	private isGuidanceEvent(event: Record<string, any>): boolean {
 		return event.type === "extension_ui_request" && event.method === "input" && isGuidanceTitle(event.title, this.token);
 	}
@@ -778,6 +793,11 @@ class SubagentRun {
 				}
 			}
 			return;
+		}
+
+		if (["agent_start", "message_end", "compaction_end"].includes(event.type)) {
+			await this.refreshContextUsage();
+			if (this.isStopped() || this.rpc !== source) return;
 		}
 
 		switch (event.type) {

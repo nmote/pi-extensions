@@ -41,6 +41,20 @@ export function formatCost(result: SubagentSnapshot): string {
 	return `$${result.usage.cost.total.toFixed(3)}`;
 }
 
+function formatTokens(tokens: number): string {
+	if (tokens < 1_000) return String(tokens);
+	const divisor = tokens < 1_000_000 ? 1_000 : 1_000_000;
+	return `${Number((tokens / divisor).toFixed(1))}${divisor === 1_000 ? "k" : "m"}`;
+}
+
+function formatContextUsage(result: SubagentSnapshot): string {
+	const usage = result.contextUsage;
+	if (!usage) return "?";
+	const tokens = usage.tokens === null ? "?" : formatTokens(usage.tokens);
+	const percent = usage.percent === null ? "?" : usage.percent.toFixed(1);
+	return `${tokens}/${formatTokens(usage.contextWindow)} (${percent}%)`;
+}
+
 function formatModel(result: SubagentSnapshot): string {
 	return `${result.model ?? "default"}${result.thinkingLevel ? ` (${result.thinkingLevel})` : ""}`;
 }
@@ -55,6 +69,7 @@ export function formatExpandedMetadata(result: SubagentSnapshot): string {
 		`- Task ${result.taskNumber ?? 1}: ${result.task}`,
 		`- Phase: ${result.phase}`,
 		`- Elapsed: ${formatElapsedTime(result)}`,
+		`- Context: ${formatContextUsage(result)}`,
 		`- Tokens: ${result.usage.totalTokens} this task / ${(result.totalUsage ?? result.usage).totalTokens} lifetime`,
 		`- Task cost: ${formatCost(result)}`,
 		`- Lifetime cost: $${(result.totalUsage ?? result.usage).cost.total.toFixed(3)}`,
@@ -67,7 +82,7 @@ export function formatExpandedMetadata(result: SubagentSnapshot): string {
 }
 
 export function formatRunStatus(result: SubagentSnapshot, now = Date.now()): string {
-	return `${statusIcon(result.status)} ${result.agent} ${result.id} · task ${result.taskNumber ?? 1} · ${formatModel(result)} · ${formatElapsedTime(result, now)} · ${formatCost(result)} · ${result.phase}${result.recoverable ? " · recoverable via subagent_continue" : ""}`;
+	return `${statusIcon(result.status)} ${result.agent} ${result.id} · task ${result.taskNumber ?? 1} · ${formatModel(result)} · ${formatElapsedTime(result, now)} · ${formatCost(result)} · ${formatContextUsage(result)} · ${result.phase}${result.recoverable ? " · recoverable via subagent_continue" : ""}`;
 }
 
 export function formatActivity(result: SubagentSnapshot): string {

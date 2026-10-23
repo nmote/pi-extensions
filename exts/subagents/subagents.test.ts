@@ -308,7 +308,7 @@ try {
 			runtime = register(entries);
 			runtime.beginSession(ctx as unknown as ExtensionContext);
 			const restoredStatus = await runtime.tools.get("subagent_status").execute("status", { id: persistentId });
-			check(`${boundary} restores the original idle ID and configuration`, restoredStatus.details.results[0].status === "idle" && restoredStatus.details.results[0].thinkingLevel === "low");
+			check(`${boundary} restores the original idle ID, configuration, and context usage`, restoredStatus.details.results[0].status === "idle" && restoredStatus.details.results[0].thinkingLevel === "low" && restoredStatus.details.results[0].contextUsage?.tokens === 60_000);
 			runtime.setMode("manual");
 			const followup = await runtime.tools.get("subagent_continue").execute("followup", { id: persistentId, task: `recall after ${boundary}` }, undefined, undefined, ctx);
 			const info = JSON.parse(followup.details.results[0].output);
@@ -445,6 +445,7 @@ try {
 	const firstUsage = simple.consumeUsage([simpleResults[0].id]);
 	check("usage is reported", firstUsage.totalTokens === 18 && firstUsage.cost.total === 0.033);
 	check("usage is reported once", simple.consumeUsage([simpleResults[0].id]).totalTokens === 0);
+	check("context usage is distinct from cumulative token usage", simpleResults[0].contextUsage?.tokens === 60_000 && simpleResults[0].contextUsage?.percent === 30);
 
 	const liveCounts: number[] = [];
 	const reusable = makeManager(undefined, (count) => liveCounts.push(count));
@@ -456,6 +457,7 @@ try {
 	check("follow-up retains user and assistant context in the same child", firstRecall.pid === secondRecall.pid && secondRecall.history.some((entry: any) => entry.text === "Task: recall first secret") && secondRecall.history.some((entry: any) => entry.role === "assistant" && entry.text === firstTask.output));
 	check("follow-up keeps its identity and launch configuration", secondTask.id === firstTask.id && secondTask.taskNumber === 2 && secondTask.task === "recall second" && secondRecall.cwd === firstRecall.cwd && JSON.stringify(secondRecall.args) === JSON.stringify(firstRecall.args));
 	check("task reporting resets without changing earlier snapshots", secondTask.usage.totalTokens === 18 && secondTask.totalUsage.totalTokens === 36 && firstTask.totalUsage.totalTokens === 18 && secondTask.activity.every((entry) => entry.at >= secondTask.startedAt));
+	check("follow-up context usage is not accumulated or reset with task usage", secondTask.contextUsage?.tokens === 60_000 && firstTask.contextUsage?.tokens === 60_000);
 	check("follow-up usage is accounted once", reusable.consumeUsage([firstTask.id]).totalTokens === 18 && reusable.consumeUsage([firstTask.id]).totalTokens === 0);
 	const wrongReply = await errorMessage(reusable.reply(firstTask.id, "invalid", context()));
 	const unknownContinue = await errorMessage(reusable.continue("missing", "work", () => "manual", context()));
@@ -471,8 +473,12 @@ try {
 	const followupApproval = await reusable.continue(firstTask.id, "approval again", () => "manual", context({ select: async () => { followupApprovals++; return "Deny"; } }));
 	check("follow-up approvals use fresh parent UI", followupApprovals === 1 && followupApproval.status === "idle" && followupApproval.output === "user decision: Deny");
 
-	const compacted = await reusable.continue(firstTask.id, "compact", () => "manual", context());
+	const afterCompaction = await reusable.continue(firstTask.id, "compact", () => "manual", context());
+	const compacted = await reusable.reply(firstTask.id, "resume", context());
 	check("task usage includes context compaction", compacted.usage.totalTokens === 36 && compacted.activity.some((entry) => entry.message === "compacting context"));
+	check("compaction clears the context estimate until a fresh response", afterCompaction.contextUsage?.tokens === null && afterCompaction.contextUsage.percent === null && compacted.contextUsage?.tokens === 20_000 && compacted.contextUsage?.percent === 10);
+	const unavailableContext = await reusable.continue(firstTask.id, "no context stats", () => "manual", context());
+	check("unavailable context stats do not fail the task", unavailableContext.status === "idle" && unavailableContext.contextUsage === undefined);
 
 	const followupAbort = new AbortController();
 	const busy = reusable.continue(firstTask.id, "hang", () => "manual", context(), undefined, followupAbort.signal);
@@ -692,7 +698,10 @@ try {
 	check("shutdown disposes standby resources idempotently", childStopped(shutdownInfo.pid) && !existsSync(promptPath(shutdownInfo)) && shutdown.status().length === 0);
 
 	const toolActivity = makeManager();
-	const toolActivityResult = await toolActivity.start([task("tool")], process.cwd(), context());
+	let liveContextReported = false;
+	const toolActivityResult = await toolActivity.start([task("tool")], process.cwd(), context(), ([snapshot]) => {
+		if (snapshot.status === "running" && snapshot.contextUsage?.tokens === 60_000) liveContextReported = true;
+	});
 	const toolRun = toolActivityResult[0]!;
 	check(
 		"tool activity includes a safe argument preview",
@@ -707,8 +716,8 @@ try {
 		startedAt: Date.now() - 65_000,
 	};
 	check(
-		"collapsed status includes model, thinking level, elapsed time, cost, and phase",
-		formatRunStatus(liveResult).includes("fake/fake-model (off) · 1m 5s · $0.033 · model thinking"),
+		"collapsed status includes model, thinking level, elapsed time, cost, live context, and phase",
+		liveContextReported && formatRunStatus(liveResult).includes("fake/fake-model (off) · 1m 5s · $0.033 · 60k/200k (30.0%) · model thinking"),
 	);
 	const withCost = (total: number) => ({
 		...liveResult,
@@ -720,7 +729,8 @@ try {
 			formatCost(withCost(0.03)) === "$0.030" &&
 			formatCost(withCost(0.0326)) === "$0.033",
 	);
-	check("expanded metadata includes cost", formatExpandedMetadata(withCost(0.0326)).includes("- Task cost: $0.033"));
+	check("expanded metadata includes cost and context", formatExpandedMetadata(withCost(0.0326)).includes("- Task cost: $0.033") && formatExpandedMetadata(liveResult).includes("- Context: 60k/200k (30.0%)"));
+	check("unknown context remains explicit in current and historical results", formatRunStatus({ ...liveResult, contextUsage: { tokens: null, contextWindow: 200_000, percent: null } }).includes(" · ?/200k (?%) · ") && formatRunStatus({ ...liveResult, contextUsage: undefined }).includes(" · ? · "));
 	const completedResult = {
 		...liveResult,
 		status: "idle" as const,
