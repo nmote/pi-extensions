@@ -89,13 +89,22 @@ export interface BacklogGraph {
 	unreadable: string[];
 }
 
-/** Select the whole weakly connected component, then draw the original directed relationships. */
-export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: GraphTheme = "light"): BacklogGraph {
+export interface GraphOptions {
+	only?: boolean;
+	depth?: number;
+}
+
+/** Select a component or subtree, then project dependencies onto the displayed hierarchy. */
+export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: GraphTheme = "light", options: GraphOptions = {}): BacklogGraph {
+	if (options.depth !== undefined && (!Number.isSafeInteger(options.depth) || options.depth < 1)) {
+		throw new Error("graph depth must be a positive safe integer");
+	}
 	if (snapshot.errors.has(root)) throw new Error(`backlog item ${root} is malformed: ${snapshot.errors.get(root)}`);
 	if (!snapshot.items.has(root)) throw new Error(`backlog item not found: ${root}`);
 
 	const t = THEMES[theme] ?? LIGHT;
 
+	const descendants = new Map<string, string[]>();
 	const neighbors = new Map<string, Set<string>>();
 	const edges = new Set<string>();
 	const link = (from: string, to: string, kind: "parent" | "dependency") => {
@@ -106,7 +115,11 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: Graph
 		edges.add(`${kind}:${from}:${to}`);
 	};
 	for (const { item } of snapshot.items.values()) {
-		if (item.parent) link(item.parent, item.id, "parent");
+		if (item.parent) {
+			link(item.parent, item.id, "parent");
+			if (!descendants.has(item.parent)) descendants.set(item.parent, []);
+			descendants.get(item.parent)!.push(item.id);
+		}
 		for (const prerequisite of item.dependsOn ?? []) link(prerequisite, item.id, "dependency");
 	}
 
@@ -116,36 +129,45 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: Graph
 		const id = pending.pop()!;
 		if (selected.has(id)) continue;
 		selected.add(id);
-		if (selected.size > MAX_GRAPH_NODES) {
-			throw new Error(`connected component exceeds ${MAX_GRAPH_NODES} items; cannot render backlog graph`);
-		}
-		pending.push(...(neighbors.get(id) ?? []));
+		pending.push(...((options.only ? descendants.get(id) : neighbors.get(id)) ?? []));
 	}
 
-	const ids = [...selected].sort();
-	const children = new Map<string, string[]>();
-	for (const id of ids) {
-		const parent = snapshot.items.get(id)?.item.parent;
-		if (parent) {
-			if (!children.has(parent)) children.set(parent, []);
-			children.get(parent)!.push(id);
-		}
-	}
 	const ancestors = (id: string): Set<string> => {
 		const seen = new Set<string>([id]);
 		let parent = snapshot.items.get(id)?.item.parent;
-		while (parent) {
+		while (parent && selected.has(parent)) {
 			if (seen.has(parent)) throw new Error(`parent cycle involving backlog item ${parent}; cannot render containment`);
 			seen.add(parent);
 			parent = snapshot.items.get(parent)?.item.parent;
 		}
 		return seen;
 	};
-	const lineage = new Map(ids.map((id) => [id, ancestors(id)]));
-	const dependencyEdges = [...edges].sort().filter((edge) => edge.startsWith("dependency:"))
-		.map((edge) => edge.split(":").slice(1) as [string, string])
-		.filter(([from, to]) => selected.has(from) && selected.has(to))
-		.filter(([from, to]) => !lineage.get(to)!.has(from) && !lineage.get(from)!.has(to));
+	const lineage = new Map([...selected].map((id) => [id, ancestors(id)]));
+	const displayed = new Set([...selected].filter((id) => options.depth === undefined || lineage.get(id)!.size <= options.depth));
+	if (displayed.size > MAX_GRAPH_NODES) {
+		throw new Error(`displayed graph exceeds ${MAX_GRAPH_NODES} items; cannot render backlog graph`);
+	}
+	const ids = [...displayed].sort();
+	const children = new Map<string, string[]>();
+	for (const id of ids) {
+		const parent = snapshot.items.get(id)?.item.parent;
+		if (parent && displayed.has(parent)) {
+			if (!children.has(parent)) children.set(parent, []);
+			children.get(parent)!.push(id);
+		}
+	}
+	const representative = new Map([...lineage].map(([id, ancestors]) => [id, [...ancestors].find((ancestor) => displayed.has(ancestor))!]));
+	const promoted = new Set<string>();
+	for (const edge of edges) {
+		if (!edge.startsWith("dependency:")) continue;
+		const [, from, to] = edge.split(":");
+		if (!selected.has(from) || !selected.has(to)) continue;
+		const source = representative.get(from)!;
+		const target = representative.get(to)!;
+		if (lineage.get(target)!.has(source) || lineage.get(source)!.has(target)) continue;
+		promoted.add(`${source}:${target}`);
+	}
+	const dependencyEdges = [...promoted].sort().map((edge) => edge.split(":") as [string, string]);
 	const endpoints = new Set(dependencyEdges.flat());
 	const unreadable: string[] = [];
 	const lines = [
@@ -173,7 +195,8 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: Graph
 	};
 	for (const id of ids) {
 		if (!snapshot.items.has(id)) unreadable.push(id);
-		if (!snapshot.items.get(id)?.item.parent) emit(id, "  ", 0);
+		const parent = snapshot.items.get(id)?.item.parent;
+		if (!parent || !displayed.has(parent)) emit(id, "  ", 0);
 	}
 	for (const [from, to] of dependencyEdges) {
 		const attributes = ["style=dashed"];
@@ -182,7 +205,7 @@ export function backlogGraph(snapshot: StoreSnapshot, root: string, theme: Graph
 		lines.push(`  ${quote(from)} -> ${quote(to)} [${attributes.join(", ")}];`);
 	}
 	lines.push("}");
-	return { dot: lines.join("\n") + "\n", count: selected.size, unreadable };
+	return { dot: lines.join("\n") + "\n", count: displayed.size, unreadable };
 }
 
 export function htmlWrapper(svgContent: string, bg: string): string {
@@ -241,10 +264,11 @@ export async function openBacklogGraph(
 	id: string,
 	format: GraphFormat = "html",
 	theme: GraphTheme = "light",
+	options: GraphOptions = {},
 	render: (dot: string, format: GraphFormat) => Promise<string> = renderGraph,
 	open: (path: string) => Promise<void> = openGraph,
 ): Promise<{ path: string; count: number; unreadable: string[]; openError?: string }> {
-	const graph = backlogGraph(await store.load(), id, theme);
+	const graph = backlogGraph(await store.load(), id, theme, options);
 	const path = await render(graph.dot, format);
 	try {
 		await open(path);

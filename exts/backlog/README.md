@@ -5,7 +5,7 @@ Tracks repository-labeled work across sessions, with parent/child plans, depende
 ## Slash commands
 
 - `/backlog [repository path|all|item ID]` — List active items for the current repository, another repository, or all repositories; an item ID shows its full contents.
-- `/backlog-graph <item ID> [--html|--svg|--png]` — Save and open the item's connected graph (HTML wrapper with themed background by default, or raw SVG/PNG with `--svg`/`--png`; flag may precede the ID). Requires Graphviz `dot` and macOS `open` or Linux `xdg-open`; the notification reports the saved path even if opening fails.
+- `/backlog-graph <item ID> [--only] [--depth n] [--html|--svg|--png]` — Save and open the item's connected graph (HTML wrapper with themed background by default, or raw SVG/PNG with `--svg`/`--png`; flags may precede the ID). Requires Graphviz `dot` and macOS `open` or Linux `xdg-open`; the notification reports the saved path even if opening fails.
 
 ## Agent tools
 
@@ -20,5 +20,7 @@ Worktrees share their main repository's label. Local filesystem remotes (paths o
 ## Storage and graphs
 
 Items live under `<agent-dir>/backlog` by default; `PI_BACKLOG_DIR` overrides it. `<agent-dir>` defaults to `~/.pi/agent`, or `PI_CODING_AGENT_DIR`.
+
+`--only` selects the item and its descendants, excluding ancestors and external dependencies. `--depth n` displays the first n hierarchy levels (a positive integer), starting at the connected component's top-level parents, or at the given item with `--only`. Depth 1 shows only those roots. Dependencies on hidden descendants attach to their nearest displayed ancestors; duplicate arrows and self-loops are omitted, but cycles between distinct items are retained. The 200-item limit applies after filtering.
 
 Graph boxes nest parents and children; dashed arrows point from prerequisite to dependent, excluding ancestor/descendant dependencies. Labels show IDs, titles, statuses, and repositories. Graphs default to a light theme (white background); set `{"graphTheme":"dark"}` (or `"theme":"dark"`) in `<agent-dir>/extensions/backlog.json` for the dark theme (black background, violet `in_progress`).

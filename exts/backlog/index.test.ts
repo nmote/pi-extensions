@@ -18,6 +18,19 @@ for (const args of ["", "--png", "invalid", "aa0001 --unknown", "aa0001 --png --
 	assert.equal(parseGraphArgs(args), undefined, args);
 }
 
+for (const args of ["aa0001 --only --depth 2 --svg", "--depth 2 --svg --only aa0001"]) {
+	assert.deepEqual(parseGraphArgs(args), { id: "aa0001", format: "svg", only: true, depth: 2 });
+}
+assert.deepEqual(parseGraphArgs("--only aa0001"), { id: "aa0001", format: "html", only: true });
+assert.deepEqual(parseGraphArgs("aa0001 --depth 1"), { id: "aa0001", format: "html", depth: 1 });
+for (const args of [
+	"aa0001 --depth", "aa0001 --depth --only", "aa0001 --depth 0", "aa0001 --depth -1",
+	"aa0001 --depth 1.5", "aa0001 --depth 1e2", "aa0001 --depth 2junk", "aa0001 --depth 9007199254740992",
+	"aa0001 --depth 1 --depth 2", "aa0001 --only --only", "--depth 1",
+]) {
+	assert.equal(parseGraphArgs(args), undefined, args);
+}
+
 const temp = mkdtempSync(join(tmpdir(), "pi-backlog-footer-"));
 const previous = process.env.PI_BACKLOG_DIR;
 try {
@@ -50,7 +63,7 @@ try {
 	await handlers.get("agent_end")!({}, ctx);
 	assert.deepEqual(statuses.at(-1), { color: "warning", text: "[backlog: unreadable]" });
 	await handlers.get("backlog-graph")!("aa0001 --unknown", ctx);
-	assert.deepEqual(notifications.at(-1), { message: "Usage: /backlog-graph <item ID> [--html|--svg|--png]", level: "error" });
+	assert.deepEqual(notifications.at(-1), { message: "Usage: /backlog-graph <item ID> [--only] [--depth n] [--html|--svg|--png]", level: "error" });
 } finally {
 	if (previous === undefined) delete process.env.PI_BACKLOG_DIR;
 	else process.env.PI_BACKLOG_DIR = previous;

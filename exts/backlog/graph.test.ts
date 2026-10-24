@@ -183,6 +183,76 @@ check(
 		/parent cycle/.test(errorOf(() => backlogGraph(snapshot([item("aa0001", { parent: "aa0001" })]), "aa0001"))),
 );
 
+const scoped = snapshot([
+	item("aa0001"),
+	item("bb0002", { parent: "aa0001" }),
+	item("cc0003", { parent: "bb0002", dependsOn: ["dd0004", "ee0005"] }),
+	item("dd0004", { parent: "bb0002", dependsOn: ["cc0003"] }),
+	item("ee0005", { dependsOn: ["cc0003"] }),
+]);
+const only = backlogGraph(scoped, "bb0002", "light", { only: true });
+check(
+	"subtree selection excludes ancestors and external dependencies but renders its parented root",
+	only.count === 3 && only.dot.includes('subgraph "cluster_bb0002"') &&
+		!only.dot.includes("aa0001") && !only.dot.includes("ee0005") &&
+		only.dot.includes('"cc0003" -> "dd0004"') && only.dot.includes('"dd0004" -> "cc0003"'),
+);
+const componentDepth = backlogGraph(scoped, "cc0003", "light", { depth: 1 });
+check(
+	"component depth starts at every hierarchy root and preserves promoted dependency cycles",
+	componentDepth.count === 2 && !componentDepth.dot.includes("bb0002") &&
+		componentDepth.dot.includes('"aa0001" -> "ee0005"') && componentDepth.dot.includes('"ee0005" -> "aa0001"') &&
+		!componentDepth.dot.includes('"aa0001" -> "aa0001"'),
+);
+const subtreeDepth = backlogGraph(scoped, "bb0002", "light", { only: true, depth: 1 });
+check(
+	"subtree depth starts at the requested item and omits collapsed self-loops",
+	subtreeDepth.count === 1 && subtreeDepth.dot.includes('"bb0002" [label=') && !subtreeDepth.dot.includes(" -> "),
+);
+check(
+	"depth two includes direct children relative to the selected scope",
+	backlogGraph(scoped, "cc0003", "light", { depth: 2 }).count === 3 &&
+		backlogGraph(scoped, "bb0002", "light", { only: true, depth: 2 }).dot === only.dot,
+);
+const collapsed = snapshot([
+	item("aa0001"),
+	item("bb0002", { parent: "aa0001" }),
+	item("cc0003", { parent: "aa0001" }),
+	item("dd0004", { dependsOn: ["aa0001", "bb0002", "cc0003"] }),
+	item("ee0005", { parent: "dd0004", dependsOn: ["bb0002", "cc0003"] }),
+]);
+const deduped = backlogGraph(collapsed, "bb0002", "light", { depth: 1 });
+check(
+	"deduplicates promoted and original dependencies by directed displayed endpoints",
+	(deduped.dot.match(/ -> /g) ?? []).length === 1 && deduped.dot.includes('"aa0001" -> "dd0004"'),
+);
+const partialDepth = backlogGraph(collapsed, "bb0002", "light", { depth: 2 });
+check(
+	"retains original endpoints when the depth includes the whole hierarchy",
+	partialDepth.dot === backlogGraph(collapsed, "bb0002").dot,
+);
+check(
+	"enforces size limits after filtering, including subtree-only filtering",
+	backlogGraph(snapshot(longChain), "000001", "light", { depth: 1 }).count === 1 &&
+		backlogGraph(snapshot(longChain), "000201", "light", { only: true }).count === 1 &&
+		/exceeds 200/.test(errorOf(() => backlogGraph(snapshot(longChain), "000001", "light", { only: true }))),
+);
+check(
+	"rejects invalid depth and detects parent cycles even below the depth cutoff",
+	/positive/.test(errorOf(() => backlogGraph(scoped, "bb0002", "light", { depth: 0 }))) &&
+		/parent cycle/.test(errorOf(() => backlogGraph(snapshot([
+			item("aa0001", { parent: "bb0002" }), item("bb0002", { parent: "aa0001" }),
+		]), "aa0001", "light", { only: true, depth: 1 }))),
+);
+const filteredUnreadable = backlogGraph(snapshot([
+	item("aa0001", { parent: "bb0002" }),
+	item("cc0003", { parent: "aa0001", dependsOn: ["dd0004"] }),
+], [["bb0002", "bad frontmatter"], ["dd0004", "bad frontmatter"]]), "aa0001", "light", { only: true, depth: 1 });
+check(
+	"omitted malformed ancestors and external dependencies do not leak into subtree output",
+	filteredUnreadable.count === 1 && filteredUnreadable.unreadable.length === 0 && filteredUnreadable.dot.includes('"aa0001" [label='),
+);
+
 const longTitle = 'Review workflow approval permissions and safely escape "quoted" \\N <labels>';
 const longRepo = `~/repos/${"x".repeat(60)}`;
 const labels = backlogGraph(snapshot([
@@ -212,6 +282,7 @@ try {
 		"aa0001",
 		undefined,
 		"light",
+		{},
 		async (dot, format) => {
 			assert.equal(format, "html");
 			rendered = dot;
@@ -227,14 +298,16 @@ try {
 			rendered.includes("aa0001") &&
 			readFileSync(store.itemPath("aa0001"), "utf8") === original,
 	);
-	const png = await openBacklogGraph(store, "aa0001", "png", "light", async (_dot, format) => {
+	writeFileSync(store.itemPath("bb0002"), formatItem(item("bb0002", { parent: "aa0001" })));
+	const png = await openBacklogGraph(store, "aa0001", "png", "light", { only: true, depth: 1 }, async (dot, format) => {
 		assert.equal(format, "png");
+		assert.ok(!dot.includes("bb0002"));
 		return "/tmp/example.png";
 	}, async (path) => { assert.equal(path, "/tmp/example.png"); });
 	assert.equal(png.path, "/tmp/example.png");
 	assert.equal(png.openError, undefined);
 	// dark theme via explicit param
-	const darkResult = await openBacklogGraph(store, "aa0001", "svg", "dark", async (dot) => {
+	const darkResult = await openBacklogGraph(store, "aa0001", "svg", "dark", {}, async (dot) => {
 		assert.ok(dot.includes('bgcolor="black"'));
 		return "/tmp/dark.svg";
 	}, async () => {});
@@ -327,7 +400,7 @@ check("openBacklogGraph defaults to html", await (async () => {
 	try {
 		const s = new BacklogStore(d);
 		writeFileSync(s.itemPath("aa0001"), formatItem(item("aa0001")));
-		const r = await openBacklogGraph(s, "aa0001", undefined as unknown as GraphFormat, "light", async (_dot, fmt) => { assert.equal(fmt, "html"); return "/tmp/fake.html"; }, async () => {});
+		const r = await openBacklogGraph(s, "aa0001", undefined as unknown as GraphFormat, "light", {}, async (_dot, fmt) => { assert.equal(fmt, "html"); return "/tmp/fake.html"; }, async () => {});
 		return r.path === "/tmp/fake.html";
 	} finally { rmSync(d, { recursive: true, force: true }); }
 })());

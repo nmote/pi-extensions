@@ -25,7 +25,7 @@ import {
 	statusSummary,
 } from "./operations.ts";
 import { loadBacklogConfig } from "./config.ts";
-import { type GraphFormat, openBacklogGraph } from "./graph.ts";
+import { type GraphFormat, type GraphOptions, openBacklogGraph } from "./graph.ts";
 import { abbreviateHome } from "./repo.ts";
 import { BACKLOG_STATUSES, BacklogStore, backlogDir, isItemId } from "./store.ts";
 
@@ -96,18 +96,35 @@ function operationContext(ctx: ExtensionContext): OperationContext {
 
 const GRAPH_FLAGS = ["--png", "--svg", "--html"] as const;
 
-export function parseGraphArgs(args: string): { id: string; format: GraphFormat } | undefined {
+const GRAPH_USAGE = "Usage: /backlog-graph <item ID> [--only] [--depth n] [--html|--svg|--png]";
+
+export function parseGraphArgs(args: string): ({ id: string; format: GraphFormat } & GraphOptions) | undefined {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
-	if (tokens.length === 0) return undefined;
-	const flags = tokens.filter((t) => (GRAPH_FLAGS as readonly string[]).includes(t));
-	const ids = tokens.filter((t) => !(GRAPH_FLAGS as readonly string[]).includes(t));
-	if (flags.length > 1) return undefined;
-	if (ids.length !== 1 || !isItemId(ids[0])) return undefined;
-	if (tokens.length !== ids.length + flags.length) return undefined;
-	const flag = flags[0] as typeof GRAPH_FLAGS[number] | undefined;
-	if (flag === "--png") return { id: ids[0], format: "png" };
-	if (flag === "--svg") return { id: ids[0], format: "svg" };
-	return { id: ids[0], format: "html" };
+	let id: string | undefined;
+	let format: GraphFormat | undefined;
+	const options: GraphOptions = {};
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index];
+		if ((GRAPH_FLAGS as readonly string[]).includes(token)) {
+			if (format) return undefined;
+			format = token.slice(2) as GraphFormat;
+		} else if (token === "--only") {
+			if (options.only) return undefined;
+			options.only = true;
+		} else if (token === "--depth") {
+			if (options.depth !== undefined) return undefined;
+			const value = tokens[++index];
+			if (!value || !/^\d+$/.test(value)) return undefined;
+			const depth = Number(value);
+			if (!Number.isSafeInteger(depth) || depth < 1) return undefined;
+			options.depth = depth;
+		} else if (isItemId(token) && !id) {
+			id = token;
+		} else {
+			return undefined;
+		}
+	}
+	return id ? { id, format: format ?? "html", ...options } : undefined;
 }
 
 export default function backlog(pi: ExtensionAPI): void {
@@ -161,17 +178,17 @@ export default function backlog(pi: ExtensionAPI): void {
 	);
 
 	pi.registerCommand("backlog-graph", {
-		description: "Open the connected backlog graph containing an item ID (HTML by default, or --svg/--png)",
+		description: "Open a backlog graph (--only for subtree, --depth n for hierarchy levels; HTML by default, or --svg/--png)",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
 			const parsed = parseGraphArgs(args);
 			if (!parsed) {
-				ctx.ui.notify("Usage: /backlog-graph <item ID> [--html|--svg|--png]", "error");
+				ctx.ui.notify(GRAPH_USAGE, "error");
 				return;
 			}
 			try {
 				const theme = loadBacklogConfig().graphTheme;
-				const graph = await openBacklogGraph(store, parsed.id, parsed.format, theme);
+				const graph = await openBacklogGraph(store, parsed.id, parsed.format, theme, parsed);
 				const warning = graph.unreadable.length ? ` Unreadable linked items: ${graph.unreadable.join(", ")}.` : "";
 				if (graph.openError) {
 					ctx.ui.notify(`Graph saved at ${graph.path}, but could not open it: ${graph.openError}.${warning}`, "warning");
