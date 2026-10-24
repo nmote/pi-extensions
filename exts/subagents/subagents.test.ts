@@ -717,7 +717,7 @@ try {
 	};
 	check(
 		"collapsed status includes model, thinking level, elapsed time, cost, live context, and phase",
-		liveContextReported && formatRunStatus(liveResult).includes("fake/fake-model (off) · 1m 5s · $0.033 · 60k/200k (30.0%) · model thinking"),
+		liveContextReported && formatRunStatus(liveResult).includes("fake/fake-model (off) · 1m 5s · $0.033 · 30.0%/200k · model thinking"),
 	);
 	const withCost = (total: number) => ({
 		...liveResult,
@@ -729,8 +729,8 @@ try {
 			formatCost(withCost(0.03)) === "$0.030" &&
 			formatCost(withCost(0.0326)) === "$0.033",
 	);
-	check("expanded metadata includes cost and context", formatExpandedMetadata(withCost(0.0326)).includes("- Task cost: $0.033") && formatExpandedMetadata(liveResult).includes("- Context: 60k/200k (30.0%)"));
-	check("unknown context remains explicit in current and historical results", formatRunStatus({ ...liveResult, contextUsage: { tokens: null, contextWindow: 200_000, percent: null } }).includes(" · ?/200k (?%) · ") && formatRunStatus({ ...liveResult, contextUsage: undefined }).includes(" · ? · "));
+	check("expanded metadata includes cost and context", formatExpandedMetadata(withCost(0.0326)).includes("- Task cost: $0.033") && formatExpandedMetadata(liveResult).includes("- Context: 30.0%/200k"));
+	check("unknown context remains explicit in current and historical results", formatRunStatus({ ...liveResult, contextUsage: { tokens: null, contextWindow: 200_000, percent: null } }).includes(" · ?%/200k · ") && formatRunStatus({ ...liveResult, contextUsage: undefined }).includes(" · ? · "));
 	const completedResult = {
 		...liveResult,
 		status: "idle" as const,

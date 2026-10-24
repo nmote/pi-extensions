@@ -50,9 +50,8 @@ function formatTokens(tokens: number): string {
 function formatContextUsage(result: SubagentSnapshot): string {
 	const usage = result.contextUsage;
 	if (!usage) return "?";
-	const tokens = usage.tokens === null ? "?" : formatTokens(usage.tokens);
 	const percent = usage.percent === null ? "?" : usage.percent.toFixed(1);
-	return `${tokens}/${formatTokens(usage.contextWindow)} (${percent}%)`;
+	return `${percent}%/${formatTokens(usage.contextWindow)}`;
 }
 
 function formatModel(result: SubagentSnapshot): string {

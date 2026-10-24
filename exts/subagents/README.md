@@ -29,6 +29,6 @@ Successful children remain idle for related follow-up work, retaining their conv
 
 Parent shutdown stops child processes. Resume and `/reload` preserve reusable children through saved sessions under `<agent-dir>/subagents`; processes reopen on continuation. Interrupted tasks—including pending supervisor questions—need explicit continuation rather than a reply. Failed and cancelled children with usable saved sessions can recover through an explicit `subagent_continue` after considering the interruption. Recovery reopens the session with the current parent approval policy and includes a brief note that the previous attempt was interrupted and may have produced side effects; it does not retry automatically or switch models. Status reports recovery eligibility and the saved session path. Protocol or approval-policy failures and missing/unreadable sessions cannot be recovered.
 
-Task displays include current context tokens/window and percentage (`?` when unavailable or awaiting a post-compaction response). Status also reports latest-task and lifetime usage. The footer counts active and retained idle children, disappearing when none remain.
+Task displays include context usage as `30.0%/200k` (`?` when unavailable or awaiting a post-compaction response). Status also reports latest-task and lifetime usage. The footer counts active and retained idle children, disappearing when none remain.
 
 `<agent-dir>` defaults to `~/.pi/agent`; `PI_CODING_AGENT_DIR` overrides it.
