@@ -141,7 +141,11 @@ try {
 	assert.ok(isRunResult(cloudflareReport));
 	assert.deepEqual(cloudflareReport.modelIdentity.pricing, jevReport.modelIdentity.pricing);
 	assert.equal(cloudflareReport.outcomes[0].estimatedCostUsd, 50 * 0.042 / 1e6);
-	assert.equal(cloudflareReport.usage.averageEstimatedCostUsd, 50 * 0.042 / 1e6);
+	const expectedAverageCost = 50 * 0.042 / 1e6;
+	const averageCost = cloudflareReport.usage.averageEstimatedCostUsd;
+	assert.ok(averageCost !== null);
+	assert.ok(Math.abs(averageCost - expectedAverageCost) <= expectedAverageCost * 1e-12,
+		`Expected average cost ${averageCost} to be within 1e-12 relative tolerance of ${expectedAverageCost}`);
 	assert.equal((cloudflareReport.modelIdentity as Record<string, unknown>).questionSchemaHash, jevIdentity.questionSchemaHash);
 	assert.deepEqual(cloudflareReport.outcomes[0].result, jevOutcome.result);
 	assert.equal(jevOutcome.routing?.fallbackUsed, false);
