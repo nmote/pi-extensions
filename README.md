@@ -15,6 +15,7 @@ extension's README lists its commands, agent tools, and usage requirements.
 | [auto-approve](exts/auto-approve/README.md) | Tool permissions and model-assisted approval |
 | [backlog](exts/backlog/README.md) | Persistent repository-labeled work and dependency graphs |
 | [cloud-agents](exts/cloud-agents/README.md) | Cursor and Codex Cloud dispatch, status, and local handoff |
+| [keep-awake](exts/keep-awake/README.md) | Prevent macOS idle sleep during agent work |
 | [model-list](exts/model-list/README.md) | Available Pi model discovery |
 | [provider-ids](exts/provider-ids/README.md) | Provider request identifiers for troubleshooting |
 | [session-memory](exts/session-memory/README.md) | Branch-aware session notes and todos |
