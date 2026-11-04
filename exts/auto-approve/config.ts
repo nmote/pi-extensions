@@ -36,10 +36,14 @@ export function isBackend(value: unknown): value is EvaluatorBackend {
 	return typeof value === "string" && (BACKENDS as string[]).includes(value);
 }
 
+type ToolSelector = { tool: string; toolPattern?: never } | { tool?: never; toolPattern: string };
+
 /**
- * A matcher describes a tool call to allow or deny.
+ * A matcher describes a tool call to allow or deny. Exactly one of `tool` or
+ * `toolPattern` is required.
  *
- * - `tool`: tool name ("bash", "read", "write", "edit", ...) or "*" for any tool.
+ * - `tool`: an exact tool name or "*" for any tool.
+ * - `toolPattern`: a JavaScript regular expression matched against the tool name.
  * - `pattern`: a JavaScript regular expression (as a string). For `bash` it is
  *   REQUIRED. Allow rules match the full command; deny and context rules also
  *   match approximate commands extracted from compound shell syntax. For other
@@ -50,15 +54,14 @@ export function isBackend(value: unknown): value is EvaluatorBackend {
  *   allow entry out of that guard. Deny entries always ignore this field and
  *   continue matching commands with operators.
  */
-export interface Matcher {
-	tool: string;
+export type Matcher = ToolSelector & {
 	pattern?: string;
 	allowShellOperators?: boolean;
 	description?: string;
-}
+};
 
 /** A matcher that supplies trusted instructions to the safety evaluator. */
-export type ContextRule = Pick<Matcher, "tool" | "pattern" | "description"> & {
+export type ContextRule = ToolSelector & Pick<Matcher, "pattern" | "description"> & {
 	instructions: string;
 };
 
@@ -171,7 +174,23 @@ function saveEvaluatorFields(fields: Record<string, unknown>, path: string): voi
 
 function asMatchers(value: unknown): Matcher[] {
 	if (!Array.isArray(value)) return [];
-	return value.filter((m): m is Matcher => !!m && typeof m === "object" && typeof (m as Matcher).tool === "string");
+	return value.filter((m): m is Matcher => {
+		if (!m || typeof m !== "object") return false;
+		const rule = m as Record<string, unknown>;
+		const exact = typeof rule.tool === "string" && rule.toolPattern === undefined;
+		const regex = rule.tool === undefined && typeof rule.toolPattern === "string";
+		if (!exact && !regex) {
+			throw new ImportResolutionError('auto-approve: rules must specify exactly one of "tool" or "toolPattern", as a string');
+		}
+		if (typeof rule.toolPattern === "string") {
+			try {
+				new RegExp(rule.toolPattern);
+			} catch {
+				throw new ImportResolutionError('auto-approve: invalid "toolPattern" regular expression');
+			}
+		}
+		return true;
+	});
 }
 
 function asStrings(value: unknown): string[] {
@@ -312,12 +331,14 @@ export function resolveConfig(rootPath: string, homeDir: string): RawConfig {
 export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 	const path = configPath();
 	let raw: RawConfig;
+	let policy: Pick<AutoApproveConfig, "allow" | "deny" | "context">;
 	let defaults: Pick<AutoApproveConfig, "defaultMode" | "evaluator"> | undefined;
 
 	try {
 		defaults = engineDefaults();
 		if (seed) seedConfig(path);
 		raw = configExists(path) ? resolveConfig(path, homedir()) : {};
+		policy = { allow: asMatchers(raw.allow), deny: asMatchers(raw.deny), context: asContextRules(raw.context) };
 	} catch (error) {
 		// A partial or unavailable policy cannot grant permissions.
 		console.error(`auto-approve: configuration unavailable, failing closed to manual mode: ${error instanceof Error ? error.message : String(error)}`);
@@ -334,9 +355,7 @@ export function loadConfig({ seed = false } = {}): AutoApproveConfig {
 
 	return {
 		defaultMode: isMode(raw.defaultMode) ? raw.defaultMode : defaults.defaultMode,
-		allow: asMatchers(raw.allow),
-		deny: asMatchers(raw.deny),
-		context: asContextRules(raw.context),
+		...policy,
 		writeRoots: asStrings(raw.writeRoots),
 		readRoots: asStrings(raw.readRoots),
 		evaluator: {

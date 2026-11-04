@@ -100,6 +100,33 @@ try {
 		const failed = loadConfig({ seed: true });
 		check("bad import fails closed without partially granting the preset", failed.defaultMode === "manual" && emptyPolicy(failed));
 
+		writeFileSync(localConfig, JSON.stringify({
+			imports: ["builtin:defaults"],
+			allow: [{ toolPattern: "^pup_" }],
+			deny: [{ toolPattern: "_delete$" }],
+			context: [{ toolPattern: "^pup_", pattern: "monitors", instructions: "monitor guidance" }],
+		}));
+		const regexPolicy = loadConfig();
+		check("tool regexes load alongside imported exact selectors",
+			regexPolicy.allow.length === preset.allow.length + 1 && regexPolicy.allow[0]!.tool === preset.allow[0].tool &&
+			regexPolicy.allow.at(-1)!.toolPattern === "^pup_" && regexPolicy.deny[0]!.toolPattern === "_delete$" &&
+			regexPolicy.context.at(-1)!.toolPattern === "^pup_" && regexPolicy.context.at(-1)!.pattern === "monitors");
+		for (const [name, selector] of [
+			["both selectors", { tool: "pup_run", toolPattern: "^pup_" }],
+			["no selector", {}],
+			["non-string selector", { toolPattern: 42 }],
+			["invalid tool regex", { toolPattern: "[" }],
+		] as const) {
+			for (const key of ["allow", "deny", "context"] as const) {
+				writeFileSync(localConfig, JSON.stringify({
+					imports: ["builtin:defaults"], defaultMode: "yolo",
+					[key]: [{ ...selector, instructions: "guidance" }],
+				}));
+				const invalid = loadConfig();
+				check(`${key} with ${name} fails closed`, invalid.defaultMode === "manual" && emptyPolicy(invalid));
+			}
+		}
+
 		// Isolate bundled-file failures without altering the installed preset.
 		const isolated = join(temp, "isolated");
 		mkdirSync(join(isolated, "auto-approve"), { recursive: true });

@@ -230,11 +230,13 @@ function bashCommandParts(command: string): string[] {
 }
 
 function matcherPatternApplies(
-	m: Pick<Matcher, "tool" | "pattern">,
+	m: Pick<Matcher, "tool" | "toolPattern" | "pattern">,
 	input: MatchInput,
 	matchBashParts = false,
 ): boolean {
-	if (m.tool !== "*" && m.tool !== input.tool) return false;
+	if (m.toolPattern !== undefined) {
+		if (m.tool !== undefined || !safeRegExp(m.toolPattern)?.test(input.tool)) return false;
+	} else if (m.tool !== "*" && m.tool !== input.tool) return false;
 	// bash matchers must specify a pattern; a bare tool match is too broad.
 	if (input.tool === "bash" && !m.pattern) return false;
 	if (!m.pattern) return true;

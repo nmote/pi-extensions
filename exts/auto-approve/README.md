@@ -35,6 +35,30 @@ The `jev` backend requires both Jev and an authenticated small model. Jev defaul
 
 Confident Jev reviews receive a best-effort independent explanation from the small model without changing the verdict. Failed explanations retain Jev's probability/confidence reason. Fallback verdicts already have a rationale and need no extra explanation call. Decision-only hybrid benchmarks exclude optional explanations but include both decision stages' costs and latency. Evaluations cache verdicts and default to a 20-second timeout per stage and `medium` chat reasoning effort. Changing the hybrid's chat model or routing policy invalidates its cache. Failures never grant access; required prompts without a usable UI block execution.
 
+### Rule matching
+
+`allow`, `deny`, and `context` rules require exactly one tool selector:
+
+- `tool`: an exact tool name, or `"*"` for all tools. No glob or regex interpretation.
+- `toolPattern`: a JavaScript regex string matched against the tool name. Matches can be substrings; use `^` and `$` to anchor them. Invalid selectors or tool regexes fail closed to manual mode.
+
+The optional `pattern` is a separate JavaScript regex matched against the bash command, the tool's `path`, or otherwise its JSON-serialized input. The tool selector and any input pattern must both match. Bash rules require `pattern`, even when selected by `toolPattern`; allow rules reject shell operators unless `allowShellOperators` is true. Deny and context rules also inspect approximate commands within compound shell syntax.
+
+For example, add evaluator guidance for a tool family:
+
+```json
+{
+  "context": [
+    {
+      "toolPattern": "^pup_",
+      "instructions": "Classify Datadog operations by whether they mutate remote state."
+    }
+  ]
+}
+```
+
+Context adds evaluator instructions; it does not itself allow or deny a call.
+
 ### Jev authentication
 
 Direct: set `TYPESAFE_API_KEY` or run `/login typesafe`; Pi's normal credential precedence applies.

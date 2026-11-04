@@ -63,10 +63,38 @@ check("allow read of .md", matchesAny(readMd, buildMatchInput("read", { path: "d
 check("reject read of .ts", !matchesAny(readMd, buildMatchInput("read", { path: "src/x.ts" })));
 check("wildcard tool matches any", matchesAny([{ tool: "*" }], buildMatchInput("read", { path: "x" })));
 
+const pupTools: Matcher[] = [{ toolPattern: "^pup_(run|logs_\\w+)$" }];
+const pupCall = buildMatchInput("pup_run", { args: ["monitors", "list"] });
+check(
+	"tool regexes select names in allow and deny rules",
+	matchesAny(pupTools, pupCall) && matchesAnyDeny(pupTools, buildMatchInput("pup_logs_search", { query: "*" })),
+);
+check(
+	"tool regexes respect anchors and do not match arguments",
+	!matchesAny(pupTools, buildMatchInput("not_pup_run", {})) &&
+		!matchesAny(pupTools, buildMatchInput("pup_run_extra", {})) &&
+		!matchesAny(pupTools, buildMatchInput("read", { path: "pup_run" })),
+);
+check("tool regexes permit substring matches", matchesAny([{ toolPattern: "run" }], pupCall));
+check(
+	"exact tool selectors keep punctuation literal",
+	matchesAny([{ tool: "pup.run" }], buildMatchInput("pup.run", {})) &&
+		!matchesAny([{ tool: "pup.run" }], pupCall) && !matchesAny([{ tool: "pup_*" }], pupCall),
+);
+check("invalid tool regexes do not match", !matchesAny([{ toolPattern: "[" }], pupCall));
+const regexBash: Matcher[] = [{ toolPattern: "^bash$", pattern: "^git status\\b" }];
+check(
+	"tool regexes preserve bash pattern and operator guards",
+	!matchesAny([{ toolPattern: ".*" }], bash("git status")) &&
+		matchesAny(regexBash, bash("git status")) && !matchesAny(regexBash, bash("git status; rm -rf /")) &&
+		matchesAnyDeny(regexBash, bash("cd repo && git status")),
+);
+
 // Matching evaluator context
 const contextRules: ContextRule[] = [
 	{ tool: "bash", pattern: "^pup\\b", instructions: "classify pup by whether it mutates data" },
 	{ tool: "pup_run", instructions: "inspect the pup subcommand" },
+	{ toolPattern: "^pup_", pattern: "monitors", instructions: "monitor guidance" },
 	{ tool: "*", pattern: ".*", instructions: "shared guidance" },
 ];
 check(
@@ -76,8 +104,8 @@ check(
 );
 check(
 	"collect matching non-bash instructions",
-	matchingInstructions(contextRules, buildMatchInput("pup_run", { args: ["monitors", "list"] })).join("|") ===
-		"inspect the pup subcommand|shared guidance",
+	matchingInstructions(contextRules, pupCall).join("|") ===
+		"inspect the pup subcommand|monitor guidance|shared guidance",
 );
 check(
 	"context bash matchers ignore the authoritative shell operator guard",
@@ -85,7 +113,18 @@ check(
 		"classify pup by whether it mutates data|shared guidance",
 );
 
-const gitContext: ContextRule[] = [{ tool: "bash", pattern: "^git\\b", instructions: "git guidance" }];
+check(
+	"tool regex context can match a family without input patterns",
+	matchingInstructions([{ toolPattern: "^pup_", instructions: "pup guidance" }],
+		buildMatchInput("pup_logs_search", { query: "*" })).join("|") === "pup guidance",
+);
+check(
+	"context requires both tool and input patterns to match",
+	matchingInstructions(contextRules, buildMatchInput("pup_run", { args: ["logs", "list"] })).join("|") ===
+		"inspect the pup subcommand|shared guidance" &&
+		matchingInstructions(contextRules, buildMatchInput("other", { path: "monitors" })).join("|") === "shared guidance",
+);
+const gitContext: ContextRule[] = [{ toolPattern: "^bash$", pattern: "^git\\b", instructions: "git guidance" }];
 const gitInstructions = (command: string) => matchingInstructions(gitContext, bash(command)).join();
 check("match a chained command", gitInstructions("cd repo && git commit -m y") === "git guidance");
 check("do not split operators inside quotes", gitInstructions('echo "a; git push"') === "");
