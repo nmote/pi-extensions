@@ -1,6 +1,5 @@
 import { SUBAGENTS_STATUS_KEY } from "../shared/footer-status.ts";
 import { writeSync } from "node:fs";
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	type AgentToolResult,
 	DEFAULT_MAX_BYTES,
@@ -69,7 +68,7 @@ const TaskFields = {
 	agent: Type.Optional(Type.String({ description: "Named agent to use; omit for a general subagent" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory; relative paths resolve from the parent cwd; a different cwd requires user approval" })),
 	model: Type.Optional(Type.String({ description: "Model as provider/id or an unambiguous model pattern" })),
-	thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Subagent thinking level" })),
+	thinkingLevel: Type.Optional(Type.Enum(THINKING_LEVELS, { type: "string", description: "Subagent thinking level" })),
 };
 
 const TaskItem = Type.Object(TaskFields);

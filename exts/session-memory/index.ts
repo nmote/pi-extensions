@@ -1,4 +1,3 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -30,7 +29,7 @@ const TODO_WIDGET = "session-memory-todos";
 
 const noteOperationSchema = Type.Object(
 	{
-		action: StringEnum(["list", "read", "write", "delete"] as const),
+		action: Type.Enum(["list", "read", "write", "delete"], { type: "string" }),
 		key: Type.Optional(Type.String({ description: "Note key for read, write, or delete" })),
 		text: Type.Optional(Type.String({ description: `Note text for write (at most ${MAX_NOTE_BYTES} bytes)` })),
 		prefix: Type.Optional(Type.String({ description: "Key prefix for list" })),
@@ -40,10 +39,10 @@ const noteOperationSchema = Type.Object(
 
 const todoOperationSchema = Type.Object(
 	{
-		action: StringEnum(["list", "add", "update", "delete"] as const),
+		action: Type.Enum(["list", "add", "update", "delete"], { type: "string" }),
 		id: Type.Optional(Type.String({ description: "Todo ID for update or delete" })),
 		text: Type.Optional(Type.String({ description: `Todo text for add or update (at most ${MAX_TODO_BYTES} bytes)` })),
-		status: Type.Optional(StringEnum(TODO_STATUSES)),
+		status: Type.Optional(Type.Enum(TODO_STATUSES, { type: "string" })),
 	},
 	{ additionalProperties: false },
 );

@@ -1,4 +1,3 @@
-import { Type } from "@earendil-works/pi-ai";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -6,6 +5,7 @@ import {
 	type ExtensionAPI,
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { matchingModelIds } from "./models.ts";
 
 export const listModelsTool = defineTool({

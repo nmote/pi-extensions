@@ -1,5 +1,4 @@
 import { BACKLOG_STATUS_KEY } from "../shared/footer-status.ts";
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -31,7 +30,7 @@ import { BACKLOG_STATUSES, BacklogStore, backlogDir, isItemId } from "./store.ts
 
 const operationSchema = Type.Object(
 	{
-		action: StringEnum(["list", "read", "add", "update", "append", "delete"] as const),
+		action: Type.Enum(["list", "read", "add", "update", "append", "delete"], { type: "string" }),
 		id: Type.Optional(Type.String({ description: "Item ID for read, update, append, or delete" })),
 		title: Type.Optional(Type.String({ description: `One-line title for add or update (at most ${MAX_TITLE_BYTES} bytes)` })),
 		body: Type.Optional(
@@ -41,7 +40,7 @@ const operationSchema = Type.Object(
 		),
 		text: Type.Optional(Type.String({ description: "Log entry appended to the item body" })),
 		status: Type.Optional(
-			StringEnum(BACKLOG_STATUSES, { description: "Item status; approved requires the user's explicit approval of the current plan" }),
+			Type.Enum(BACKLOG_STATUSES, { type: "string", description: "Item status; approved requires the user's explicit approval of the current plan" }),
 		),
 		repos: Type.Optional(
 			Type.Array(Type.String(), { description: "Repository paths for add or update; add defaults to the current repository" }),
@@ -50,7 +49,7 @@ const operationSchema = Type.Object(
 			Type.String({ description: `Repository path for list; defaults to the current repository; "${ALL_REPOS}" lists every repository` }),
 		),
 		statuses: Type.Optional(
-			Type.Array(StringEnum(BACKLOG_STATUSES), { description: `Statuses for list; defaults to ${ACTIVE_STATUSES.join(", ")}` }),
+			Type.Array(Type.Enum(BACKLOG_STATUSES, { type: "string" }), { description: `Statuses for list; defaults to ${ACTIVE_STATUSES.join(", ")}` }),
 		),
 		query: Type.Optional(Type.String({ description: "Case-insensitive title and body filter for list" })),
 		parent: Type.Optional(
