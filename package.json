@@ -21,6 +21,7 @@
       "./exts/auto-approve/index.ts",
       "./exts/backlog/index.ts",
       "./exts/cloud-agents/index.ts",
+      "./exts/conversation-only/index.ts",
       "./exts/keep-awake/index.ts",
       "./exts/model-list/index.ts",
       "./exts/provider-ids/index.ts",
