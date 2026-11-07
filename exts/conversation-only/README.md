@@ -1,10 +1,14 @@
 # Conversation-only reader
 
-Press **Ctrl+Alt+O** or run `/conversation-only` while Pi is idle to open a
-read-only snapshot. Requires regular terminal mode; fullscreen produces an error.
+Press **Ctrl+Alt+O** or run `/conversation-only` to open a read-only snapshot,
+even while Pi is working. Requires regular terminal mode; fullscreen produces an
+error.
 
 Scroll with your terminal's normal scrollback controls. Press **Ctrl+Alt+O**,
 **Escape**, or **Ctrl+C** to close and restore the editor, including its draft.
+These keys close the reader rather than interrupting Pi. Approval dialogs
+temporarily replace the reader; answering them restores the frozen snapshot.
+New messages appear only after reopening.
 
 The snapshot includes user and assistant text from the active branch, including
 history before compaction. It omits thinking, tool calls/results, summaries, and

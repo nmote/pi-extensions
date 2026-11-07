@@ -55,7 +55,7 @@ let reader: Component | undefined;
 let mode = "regular";
 let customCalls = 0;
 const ctx = {
-	mode: "tui", isIdle: () => true, hasPendingMessages: () => false, sessionManager: session,
+	mode: "tui", isIdle: () => false, hasPendingMessages: () => true, sessionManager: session,
 	ui: {
 		notify: (message: string) => notifications.push(message),
 		custom: async (factory: any) => {
@@ -81,8 +81,6 @@ const ctx = {
 const toggle = shortcuts.get(Key.ctrlAlt("o")).handler;
 const command = commands.get("conversation-only").handler;
 await toggle({ ...ctx, mode: "rpc" });
-await toggle({ ...ctx, isIdle: () => false });
-await toggle({ ...ctx, hasPendingMessages: () => true });
 assert.equal(customCalls, 0);
 mode = "fullscreen";
 await toggle(ctx);
@@ -105,9 +103,12 @@ try {
 	assert(writes.includes("\x1b[45m"), "assistant messages have a distinct background");
 	assert(!writes.includes("Hidden"));
 	assert(!writes.includes("Abandoned branch"));
+	session.appendMessage({ role: "user", content: "Arrived while reading", timestamp: 0 });
 	for (const width of [20, 70]) {
 		reader!.invalidate();
-		assert(reader!.render(width).every((line) => visibleWidth(line) <= width));
+		const lines = reader!.render(width);
+		assert(lines.every((line) => visibleWidth(line) <= width));
+		assert(!lines.join("\n").includes("Arrived while reading"));
 	}
 	reader!.handleInput!("x");
 	assert.match(editor.render(70).join("\n"), /End of snapshot/);
@@ -117,6 +118,7 @@ try {
 
 	for (const close of [() => reader!.handleInput!("\x1b\x0f"), () => events.get("session_shutdown")()]) {
 		const reopened = toggle(ctx);
+		assert(reader!.render(70).join("\n").includes("Arrived while reading"));
 		close();
 		await reopened;
 	}

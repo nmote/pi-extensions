@@ -33,10 +33,6 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("Conversation reader requires regular terminal mode.", "error");
 			return;
 		}
-		if (!ctx.isIdle() || ctx.hasPendingMessages()) {
-			ctx.ui.notify("Wait until Pi is idle to open the conversation reader.", "error");
-			return;
-		}
 		open = true;
 		try {
 			const messages = conversationSnapshot(ctx.sessionManager.getBranch());
