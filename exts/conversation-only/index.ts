@@ -38,7 +38,11 @@ export default function (pi: ExtensionAPI) {
 			const messages = conversationSnapshot(ctx.sessionManager.getBranch());
 			await ctx.ui.custom<void>((tui, theme, _keys, done) => {
 				if (tui.mode !== "regular") throw new Error("Conversation reader requires regular mode; disable fullscreen in /settings.");
-				close = () => done();
+				const finish = () => {
+					done();
+					tui.requestRender(true);
+				};
+				close = finish;
 				const content = new Container();
 				content.addChild(new Text(theme.fg("accent", "Conversation snapshot"), 1, 0));
 				for (const message of messages) {
@@ -55,7 +59,7 @@ export default function (pi: ExtensionAPI) {
 					render: (width) => content.render(width),
 					invalidate: () => content.invalidate(),
 					handleInput(data) {
-						if (matchesKey(data, shortcut) || matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) done();
+						if (matchesKey(data, shortcut) || matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) finish();
 					},
 				};
 			});

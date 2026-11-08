@@ -40,7 +40,7 @@ const terminal = {
 const tui = new TuiMainScreen(terminal, false);
 const editor = new Container();
 editor.addChild(new Text("Unsubmitted draft", 0, 0));
-tui.addChild(new Text("Normal transcript", 0, 0));
+tui.addChild(new Text(Array.from({ length: 30 }, (_, i) => `Normal transcript ${i}`).join("\n"), 0, 0));
 tui.addChild(editor);
 const commands = new Map<string, any>();
 const shortcuts = new Map<string, any>();
@@ -62,7 +62,7 @@ const ctx = {
 			customCalls++;
 			await new Promise<void>((resolve, reject) => {
 				try {
-					reader = factory({ mode }, {
+					reader = factory({ mode, requestRender: (force: boolean) => tui.requestRender(force) }, {
 						fg: (_color: string, text: string) => text,
 						bold: (text: string) => text,
 						bg: (color: string, text: string) => `\x1b[${color === "userMessageBg" ? 44 : 45}m${text}\x1b[49m`,
@@ -112,8 +112,15 @@ try {
 	}
 	reader!.handleInput!("x");
 	assert.match(editor.render(70).join("\n"), /End of snapshot/);
+	writes = "";
 	reader!.handleInput!("\x1b");
 	await opened;
+	tui.renderNow();
+	assert(writes.includes("\x1b[3J"), "closing rebuilds scrollback instead of leaving the snapshot's empty area");
+	assert.match(writes, /Normal transcript 29/);
+	assert.match(writes, /Unsubmitted draft/);
+	const restored = tui.captureRenderState();
+	assert.equal(restored.previousViewportTop, restored.previousLines.length - terminal.rows);
 	assert.match(editor.render(70).join("\n"), /Unsubmitted draft/);
 
 	for (const close of [() => reader!.handleInput!("\x1b\x0f"), () => events.get("session_shutdown")()]) {
