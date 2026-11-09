@@ -274,9 +274,21 @@ try {
 		const displayId = waitingDisplay.details.results[0].id;
 		const displayTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 		let invalidations = 0;
-		const renderContext = { toolCallId: "display-wait", invalidate: () => { invalidations++; } };
+		const renderContext = { toolCallId: "display-wait", invalidate: () => { invalidations++; }, cwd: ctx.cwd };
 		const renderDisplay = (tool = displaySpawn, result = waitingDisplay, context = renderContext, expanded = false) =>
 			tool.renderResult(result, { expanded, isPartial: false }, displayTheme, context).render(240).join("\n");
+		const differentCwd = join(testDir, "fixtures");
+		const mixedCwdDisplay = { ...waitingDisplay, details: { ...waitingDisplay.details, results: [
+			waitingDisplay.details.results[0], { ...waitingDisplay.details.results[1], cwd: differentCwd },
+		] } };
+		check("live spawn, continuation, and reply displays identify only a different cwd", [displaySpawn, displayRuntime.tools.get("subagent_continue"), displayReply].every((tool) => {
+			const text = tool.renderResult(mixedCwdDisplay, { expanded: false, isPartial: true }, displayTheme, renderContext).render(240).join("\n");
+			return text.includes(`\n  cwd: ${differentCwd}`) && text.split("cwd:").length === 2 && !renderDisplay(tool).includes("cwd:");
+		}));
+		const parentCwdAlias = join(agentDir, "display-cwd");
+		await symlink(ctx.cwd, parentCwdAlias);
+		check("parent cwd aliases do not add directory labels", !renderDisplay(displaySpawn, waitingDisplay, { ...renderContext, cwd: parentCwdAlias }).includes("cwd:"));
+		check("unavailable parent cwd preserves the result display", renderDisplay(displaySpawn, mixedCwdDisplay, { ...renderContext, cwd: join(agentDir, "missing-cwd") }).includes(`cwd: ${differentCwd}`));
 		check("unanswered widget requests supervisor input", renderDisplay().includes("Supervisor reply required"));
 		await errorMessage(displayReply.execute("wrong", { id: "unknown", answer: "two" }, undefined, undefined, ctx));
 		check("rejected reply leaves the original widget waiting", invalidations === 0 && !renderDisplay().includes("supervisor replied;"));

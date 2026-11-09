@@ -1,5 +1,5 @@
 import { SUBAGENTS_STATUS_KEY } from "../shared/footer-status.ts";
-import { writeSync } from "node:fs";
+import { realpathSync, writeSync } from "node:fs";
 import {
 	type AgentToolResult,
 	DEFAULT_MAX_BYTES,
@@ -153,14 +153,23 @@ function renderSubagentResult(
 	result: AgentToolResult<SubagentDetails>,
 	{ expanded }: ToolRenderResultOptions,
 	theme: Theme,
+	parentCwd: string,
 	replied: ReadonlySet<string> = new Set(),
 ): Component {
 	const details = result.details;
 	if (!details) return new Text(result.content[0]?.type === "text" ? result.content[0].text : "", 0, 0);
 	if (!expanded) {
-		let text = details.results.map((item) => formatRunStatus(replied.has(item.id)
-			? { ...item, status: "idle", phase: REPLIED_PHASE, taskEndedAt: item.updatedAt }
-			: item)).join("\n");
+		try {
+			parentCwd = realpathSync(parentCwd);
+		} catch {
+			// Historical working directories may be unavailable.
+		}
+		let text = details.results.map((item) => {
+			const status = formatRunStatus(replied.has(item.id)
+				? { ...item, status: "idle", phase: REPLIED_PHASE, taskEndedAt: item.updatedAt }
+				: item);
+			return status + (item.cwd !== parentCwd ? theme.fg("dim", `\n  cwd: ${item.cwd}`) : "");
+		}).join("\n");
 		if (details.results.some((item) => item.status === "waiting" && !replied.has(item.id))) {
 			text += `\n${theme.fg("warning", "Supervisor reply required")}`;
 		}
@@ -308,14 +317,14 @@ export default function subagents(pi: ExtensionAPI): void {
 			renderInvalidators.get(toolCallId)?.();
 		}
 	}
-	function renderResult(result: AgentToolResult<SubagentDetails>, options: ToolRenderResultOptions, theme: Theme, context: { toolCallId: string; invalidate: () => void }): Component {
+	function renderResult(result: AgentToolResult<SubagentDetails>, options: ToolRenderResultOptions, theme: Theme, context: { toolCallId: string; invalidate: () => void; cwd: string }): Component {
 		const replied = repliedCalls.get(context.toolCallId);
 		if (!options.isPartial && result.details?.results.some((item) => item.status === "waiting" && !replied?.has(item.id))) {
 			renderInvalidators.set(context.toolCallId, context.invalidate);
 		} else {
 			renderInvalidators.delete(context.toolCallId);
 		}
-		return renderSubagentResult(result, options, theme, replied);
+		return renderSubagentResult(result, options, theme, context.cwd, replied);
 	}
 	function refreshStatus(count: number): void {
 		if (!statusContext?.hasUI) return;
