@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { initTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type AutoApproveStat, SUBAGENT_RUN_ID_ENV, SUBAGENT_TOKEN_ENV, SUBAGENT_PROTOCOL_ENV, SUBAGENT_HANDSHAKE_COMMAND, protocolAck } from "../shared/subagent-protocol.ts";
+import { type AutoApproveStat, FAST_MODE_STATE_CHANNEL, SUBAGENT_RUN_ID_ENV, SUBAGENT_TOKEN_ENV, SUBAGENT_PROTOCOL_ENV, SUBAGENT_HANDSHAKE_COMMAND, protocolAck } from "../shared/subagent-protocol.ts";
 import {
 	discoverNamedAgents,
 	formatNamedAgentCatalog,
@@ -129,12 +129,13 @@ try {
 }
 
 const managers: SubagentManager[] = [];
-const makeManager = (onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void, onLiveCountChange?: (count: number) => void, onGuidanceRequest?: SubagentManagerOptions["onGuidanceRequest"]) => {
+const makeManager = (onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void, onLiveCountChange?: (count: number) => void, onGuidanceRequest?: SubagentManagerOptions["onGuidanceRequest"], options: SubagentManagerOptions = {}) => {
 	const manager = new SubagentManager({
 		invocation: { command: process.execPath, argsPrefix: [fixture] },
 		onAutoApproveStat,
 		onLiveCountChange,
 		onGuidanceRequest,
+		...options,
 	});
 	managers.push(manager);
 	return manager;
@@ -177,6 +178,7 @@ try {
 		let beginSession = (_ctx: ExtensionContext) => {};
 		let endSession = async () => {};
 		let approvalMode = "yolo";
+		let fastMode: boolean | undefined;
 		let failPersistence = false;
 		const pi = {
 			registerTool(tool: any) { tools.set(tool.name, tool); },
@@ -195,6 +197,7 @@ try {
 			},
 			events: { emit(name: string, request: any) {
 				if (name === "auto-approve:get-state") request.respond({ mode: approvalMode });
+				if (name === FAST_MODE_STATE_CHANNEL && fastMode !== undefined) request.respond({ enabled: fastMode });
 			} },
 		};
 		const originalScript = process.argv[1];
@@ -204,7 +207,7 @@ try {
 		} finally {
 			process.argv[1] = originalScript;
 		}
-		return { tools, beginSession, shutdown: () => endSession(), beginTurn: () => beginTurn(), setMode: (mode: string) => { approvalMode = mode; }, failPersistence: () => { failPersistence = true; } };
+		return { tools, beginSession, shutdown: () => endSession(), beginTurn: () => beginTurn(), setMode: (mode: string) => { approvalMode = mode; }, setFastMode: (enabled: boolean) => { fastMode = enabled; }, failPersistence: () => { failPersistence = true; } };
 	};
 	try {
 		const { tools, beginSession, beginTurn, setMode } = register();
@@ -307,9 +310,32 @@ try {
 		restoredDisplay.beginSession(ctx as unknown as ExtensionContext);
 		check("answered widget survives runtime restoration", renderDisplay(restoredDisplay.tools.get("subagent")).includes("supervisor replied; continued in subagent_reply"));
 
+		const fastNotices: string[] = [];
+		const fastCtx = { ...ctx, ui: { ...ctx.ui, notify: (message: string) => fastNotices.push(message) } };
+		const fastRuntime = register();
+		fastRuntime.beginSession(fastCtx as unknown as ExtensionContext);
+		fastRuntime.setFastMode(true);
+		const fastLaunch = await fastRuntime.tools.get("subagent").execute("fast-launch", { task: "recall Fast launch" }, undefined, undefined, fastCtx);
+		const fastId = fastLaunch.details.results[0].id;
+		const fastLaunchInfo = JSON.parse(fastLaunch.details.results[0].output);
+		fastRuntime.setFastMode(false);
+		const fastFollowup = await fastRuntime.tools.get("subagent_continue").execute("fast-off", { id: fastId, task: "recall Fast off" }, undefined, undefined, fastCtx);
+		const fastFollowupInfo = JSON.parse(fastFollowup.details.results[0].output);
+		check("Fast preference inherits at launch and clears on live continuation", fastLaunchInfo.fastEnabled === true && fastFollowupInfo.fastEnabled === false && fastLaunchInfo.pid === fastFollowupInfo.pid);
+		fastRuntime.setFastMode(true);
+		fastRuntime.setMode("manual");
+		await fastRuntime.tools.get("subagent_continue").execute("fast-question", { id: fastId, task: "ask fast" }, undefined, undefined, fastCtx);
+		fastRuntime.setFastMode(false);
+		fastRuntime.setMode("yolo");
+		const fastReply = await fastRuntime.tools.get("subagent_reply").execute("fast-reply", { id: fastId, answer: "two" }, undefined, undefined, fastCtx);
+		const fastReplyInfo = JSON.parse(fastReply.details.results[0].output);
+		check("supervisor reply clears Fast before answering without resetting approval mode", fastReplyInfo.answer === "two" && fastReplyInfo.fastEnabled === false && fastReplyInfo.mode === "manual" && fastReplyInfo.fastUpdates.join(",") === "true,false,true,false");
+		check("Fast acknowledgements stay internal", fastNotices.length === 0);
+
 		const entries: any[] = [];
 		let runtime = register(entries);
 		runtime.beginSession(ctx as unknown as ExtensionContext);
+		runtime.setFastMode(true);
 		const initial = await runtime.tools.get("subagent").execute("persistent", { task: "recall persistent", model: "fake/fake-model", thinkingLevel: "low" }, undefined, undefined, ctx);
 		const persistentId = initial.details.results[0].id;
 		let previousInfo = JSON.parse(initial.details.results[0].output);
@@ -322,9 +348,10 @@ try {
 			const restoredStatus = await runtime.tools.get("subagent_status").execute("status", { id: persistentId });
 			check(`${boundary} restores the original idle ID, configuration, and context usage`, restoredStatus.details.results[0].status === "idle" && restoredStatus.details.results[0].thinkingLevel === "low" && restoredStatus.details.results[0].contextUsage?.tokens === 60_000);
 			runtime.setMode("manual");
+			runtime.setFastMode(boundary === "resume");
 			const followup = await runtime.tools.get("subagent_continue").execute("followup", { id: persistentId, task: `recall after ${boundary}` }, undefined, undefined, ctx);
 			const info = JSON.parse(followup.details.results[0].output);
-			check(`${boundary} reopens retained history with current approval policy`, info.pid !== previousInfo.pid && info.mode === "manual" && info.history[0].text === "Task: recall persistent");
+			check(`${boundary} reopens retained history with current approval and Fast preferences`, info.pid !== previousInfo.pid && info.mode === "manual" && info.fastEnabled === (boundary === "resume") && info.history[0].text === "Task: recall persistent");
 			check(`${boundary} retains launch settings and instructions`, info.args[info.args.indexOf("--model") + 1] === "fake/fake-model" && info.args[info.args.indexOf("--thinking") + 1] === "low" && await readFile(info.args[info.args.indexOf("--append-system-prompt") + 1], "utf8") === initialPrompt);
 			check(`${boundary} accounts only new usage`, followup.usage.totalTokens === 18 && followup.details.results[0].totalUsage.totalTokens === (boundary === "reload" ? 36 : 54));
 			previousInfo = info;
@@ -334,7 +361,7 @@ try {
 		runtime = register(entries);
 		runtime.beginSession(ctx as unknown as ExtensionContext);
 		const resumedCancellation = await runtime.tools.get("subagent_continue").execute("continue", { id: persistentId, task: "recall after cancellation" }, undefined, undefined, ctx);
-		check("cancelled children recover after restoration with retained history", resumedCancellation.details.results[0].status === "idle" && JSON.parse(resumedCancellation.details.results[0].output).history[0].text === "Task: recall persistent");
+		check("cancelled children recover with retained history and default-off Fast", resumedCancellation.details.results[0].status === "idle" && JSON.parse(resumedCancellation.details.results[0].output).fastEnabled === false && JSON.parse(resumedCancellation.details.results[0].output).history[0].text === "Task: recall persistent");
 
 		const stale = await runtime.tools.get("subagent").execute("stale", { task: "done" }, undefined, undefined, ctx);
 		const staleId = stale.details.results[0].id;
@@ -502,16 +529,18 @@ try {
 	const resumedInfo = JSON.parse(resumedTask.output!);
 	check("cancelled active child reopens with history, current policy and interruption warning", resumedTask.status === "idle" && resumedInfo.pid !== firstRecall.pid && resumedInfo.mode === "manual" && resumedInfo.history[0].text === "Task: recall first secret" && resumedInfo.history.at(-1).text.includes("Inspect existing state before repeating consequential actions") && resumedTask.previousFailure?.kind === "aborted");
 
-	const failedAgent = makeManager();
+	let recoveryFastMode = true;
+	const failedAgent = makeManager(undefined, undefined, undefined, { getFastMode: () => recoveryFastMode });
 	const failedTask = (await failedAgent.start([task("fail slow cleanup")], process.cwd(), context()))[0]!;
 	failedAgent.consumeUsage([failedTask.id]);
 	check("provider failure exposes saved context and explicit recovery", failedTask.status === "failed" && failedTask.failureKind === "provider" && failedTask.recoverable === true && !!failedTask.sessionFile && formatExpandedMetadata(failedTask).includes("continue explicitly"));
+	recoveryFastMode = false;
 	const recovering = failedAgent.continue(failedTask.id, "recall after quota", () => "manual", context());
 	const duplicateRecovery = await errorMessage(failedAgent.continue(failedTask.id, "wrong", () => "manual", context()));
 	const recoveredTask = await recovering;
 	const recoveredInfo = JSON.parse(recoveredTask.output!);
 	check("recovery reserves the run and ignores late old-process events", duplicateRecovery.includes("while running") && recoveredTask.status === "idle" && recoveredTask.usage.totalTokens === 18);
-	check("recovery retains identity, context, settings and lifetime accounting", recoveredTask.id === failedTask.id && recoveredTask.taskNumber === 2 && recoveredInfo.history[0].text === "Task: fail slow cleanup" && recoveredInfo.mode === "manual" && recoveredInfo.args[recoveredInfo.args.indexOf("--model") + 1] === failedTask.model && recoveredTask.totalUsage.totalTokens === 36 && failedAgent.consumeUsage([failedTask.id]).totalTokens === 18 && recoveredTask.previousFailure?.message === failedTask.error);
+	check("recovery retains identity, context, settings and lifetime accounting", recoveredTask.id === failedTask.id && recoveredTask.taskNumber === 2 && recoveredInfo.history[0].text === "Task: fail slow cleanup" && recoveredInfo.mode === "manual" && recoveredInfo.fastEnabled === false && recoveredInfo.args[recoveredInfo.args.indexOf("--model") + 1] === failedTask.model && recoveredTask.totalUsage.totalTokens === 36 && failedAgent.consumeUsage([failedTask.id]).totalTokens === 18 && recoveredTask.previousFailure?.message === failedTask.error);
 	const repeatedFailure = await failedAgent.continue(failedTask.id, "fail again", () => "manual", context());
 	check("repeated quota failure remains explicitly recoverable", repeatedFailure.status === "failed" && repeatedFailure.recoverable === true && repeatedFailure.totalUsage.totalTokens === 54);
 	const savedFailure = failedAgent.persistedState();
@@ -582,6 +611,45 @@ try {
 	check("aborted settlement without an assistant result can recover from saved session", abortedSettlement.status === "failed" && abortedSettlement.failureKind === "aborted" && abortedSettlement.error === "Subagent stopped: aborted" && abortedSettlement.recoverable === true && !!abortedSettlement.sessionFile);
 	const abortedRecovery = await abortedAgent.continue(abortedSettlement.id, "recall after aborted", () => "manual", context());
 	check("aborted recovery retains context and current policy", abortedRecovery.status === "idle" && abortedRecovery.previousFailure?.kind === "aborted");
+	const fastManager = (behavior: string, getFastMode: () => boolean) => makeManager(undefined, undefined, undefined, {
+		invocation: { command: process.execPath, argsPrefix: [fixture, "--fake-fast", behavior] },
+		getFastMode,
+	});
+	for (const [behavior, enabled, diagnostic] of [
+		["missing", true, "unavailable"], ["template", true, "unavailable"],
+		["no-ack", true, "not acknowledged"], ["no-ack", false, "not acknowledged"],
+		["wrong-token", true, "not acknowledged"], ["wrong-state", false, "not acknowledged"],
+		["unhandled", true, "not acknowledged"],
+	] as const) {
+		const [result] = await fastManager(behavior, () => enabled).start([task("must not run")], process.cwd(), context());
+		check(`Fast ${behavior} (${enabled ? "on" : "off"}) fails before model execution`, result.status === "failed" && result.failureKind === "protocol" && !!result.error?.includes(diagnostic) && result.usage.totalTokens === 0 && result.output === undefined);
+	}
+	const [noFastCommand] = await fastManager("missing", () => false).start([task("done")], process.cwd(), context());
+	check("missing Fast extension is compatible while preference is off", noFastCommand.status === "idle");
+
+	let currentFastMode = true;
+	const [lateFast] = await fastManager("slow-discovery", () => currentFastMode).start([task("recall Fast")], process.cwd(), context({ notify: (message) => {
+		if (message.includes("discovering task policy")) currentFastMode = false;
+	} }));
+	check("Fast getter observes changes during launch preparation", JSON.parse(lateFast.output!).fastEnabled === false);
+
+	const failedFastReply = fastManager("normal", () => true);
+	const [unacknowledgedQuestion] = await failedFastReply.start([task("ask fast no fast ack")], process.cwd(), context());
+	const unacknowledgedReply = await failedFastReply.reply(unacknowledgedQuestion.id, "must not be delivered", context());
+	check("missing Fast acknowledgement cannot release a supervisor answer", unacknowledgedReply.status === "failed" && unacknowledgedReply.failureKind === "protocol" && unacknowledgedReply.output === undefined && unacknowledgedReply.usage.totalTokens === unacknowledgedQuestion.usage.totalTokens);
+
+	const fastReplyRace = fastManager("normal", () => true);
+	const [slowFastQuestion] = await fastReplyRace.start([task("ask fast slow fast")], process.cwd(), context());
+	const replyAbort = new AbortController();
+	const pendingFastReply = fastReplyRace.reply(slowFastQuestion.id, "must not be delivered", context({ notify: (message) => {
+		if (message.includes("updating Fast preference")) replyAbort.abort();
+	} }), undefined, replyAbort.signal);
+	const duplicateFastReply = await errorMessage(fastReplyRace.reply(slowFastQuestion.id, "duplicate", context()));
+	const cancelledFastReply = await pendingFastReply;
+	check("Fast synchronization reserves a reply and preserves its cancellation hooks", duplicateFastReply.includes("not waiting") && cancelledFastReply.status === "cancelled" && cancelledFastReply.output === undefined && cancelledFastReply.usage.totalTokens === slowFastQuestion.usage.totalTokens);
+	const afterReplyCancellation = await fastReplyRace.continue(slowFastQuestion.id, "recall after cancelled reply", () => "manual", context());
+	check("cancelled Fast reply cannot answer a replacement process", afterReplyCancellation.status === "idle" && JSON.parse(afterReplyCancellation.output!).history.every((entry: { role: string }) => entry.role !== "assistant"));
+
 	const missingPolicy = makeManager();
 	const previousProtocol = process.env.FAKE_PROTOCOL;
 	try {

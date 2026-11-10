@@ -17,6 +17,7 @@ import {
 	AUTO_APPROVE_STATE_CHANNEL,
 	AUTO_APPROVE_STAT_CHANNEL,
 	AUTO_APPROVE_TASK_CHANNEL,
+	FAST_MODE_STATE_CHANNEL,
 	SUBAGENT_TASK_COMMAND,
 	SUBAGENT_HANDSHAKE_COMMAND,
 	SUBAGENT_PROTOCOL_ENV,
@@ -218,6 +219,16 @@ function getAutoApproveMode(pi: ExtensionAPI): string {
 	return mode ?? "manual";
 }
 
+function getFastMode(pi: ExtensionAPI): boolean {
+	let enabled = false;
+	pi.events.emit(FAST_MODE_STATE_CHANNEL, {
+		respond: (state: { enabled: boolean }) => {
+			if (typeof state?.enabled === "boolean") enabled = state.enabled;
+		},
+	});
+	return enabled;
+}
+
 function registerChildTool(pi: ExtensionAPI, token: string): void {
 	pi.on("cache_warming_decision", () => ({ action: "stop" }));
 	pi.on("session_start", (_event, ctx) => {
@@ -331,6 +342,7 @@ export default function subagents(pi: ExtensionAPI): void {
 		statusContext.ui.setStatus(SUBAGENTS_STATUS_KEY, count ? statusContext.ui.theme.fg("dim", `[subagents: ${count} live]`) : undefined);
 	}
 	const manager = new SubagentManager({
+		getFastMode: () => getFastMode(pi),
 		onLiveCountChange: refreshStatus,
 		onAutoApproveStat: (stat) => pi.events.emit(AUTO_APPROVE_STAT_CHANNEL, { stat }),
 		onGuidanceRequest: (request, ctx) => requestGuidance(pi, ctx, request),
@@ -453,7 +465,7 @@ export default function subagents(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_continue",
 		label: "Continue Subagent",
-		description: "Assign a related task to an idle, failed, or cancelled subagent with a usable saved session, retaining its conversation context. Failed and cancelled children reopen from persisted context; consider the interruption before retrying. Reuses its agent, model, thinking level, cwd, and tools; inherits the parent's current approval mode and session guidance. Returns at task completion or a supervisor question. Use subagent_reply for waiting questions; protocol/approval-policy failures and missing sessions cannot be recovered.",
+		description: "Assign a related task to an idle, failed, or cancelled subagent with a usable saved session, retaining its conversation context. Failed and cancelled children reopen from persisted context; consider the interruption before retrying. Reuses its agent, model, thinking level, cwd, and tools; inherits the parent's current approval mode, session guidance, and Fast preference. Returns at task completion or a supervisor question. Use subagent_reply for waiting questions; protocol/approval-policy failures and missing sessions cannot be recovered.",
 		parameters: Type.Object({
 			id: Type.String({ minLength: 1, description: "Idle or failed subagent ID with a usable saved session" }),
 			task: TaskFields.task,

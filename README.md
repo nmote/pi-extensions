@@ -16,6 +16,7 @@ extension's README lists its commands, agent tools, and usage requirements.
 | [backlog](exts/backlog/README.md) | Persistent repository-labeled work and dependency graphs |
 | [cloud-agents](exts/cloud-agents/README.md) | Cursor and Codex Cloud dispatch, status, and local handoff |
 | [conversation-only](exts/conversation-only/README.md) | Read conversation snapshots in terminal scrollback |
+| [fast-mode](exts/fast-mode/README.md) | Opt-in Codex Fast inference and purchased-credit cost estimates |
 | [keep-awake](exts/keep-awake/README.md) | Prevent macOS idle sleep during agent work |
 | [model-list](exts/model-list/README.md) | Available Pi model discovery |
 | [provider-ids](exts/provider-ids/README.md) | Provider request identifiers for troubleshooting |

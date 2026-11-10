@@ -8,6 +8,7 @@ Delegates focused work to isolated Pi children that can ask their parent for gui
 - `/subagent-models [routine|complex [clear|effort <level|clear>]]` — Show preferences, pick a model for a task tier, or clear that tier. Use `effort <level>` to set its thinking-level recommendation and `effort clear` to remove only that recommendation. Levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set a model before setting effort; changing the model preserves effort. Unset tiers inherit the session model.
 - `/_subagent-task` — Internal child-only approval-policy update; not for manual use.
 - `/_subagent-handshake` — Internal child-only protocol check; not for manual use.
+- `/_subagent-fast` — Internal child-only Fast preference update provided by [fast-mode](../fast-mode/README.md); not for manual use.
 
 ## Agent tools
 
@@ -26,6 +27,8 @@ Model and effort preferences are saved in `<agent-dir>/extensions/subagent-model
 Each child process must match the parent's loaded protocol version and acknowledge a handshake before model execution, including after resume. A mismatch stops the child: run `/reload` in the parent, then restart the child. Handshake timeouts and missing acknowledgements are reported separately. Protocol versions change only for incompatible wire-format or approval-policy changes.
 
 Successful children remain idle for related follow-up work, retaining their conversation (subject to Pi compaction), instructions, model, thinking level, cwd, and tools. Each follow-up inherits the parent's current approval mode and guidance. Exact-call approvals persist; one-shot approvals expire between tasks. Cwd approval lasts for the child's lifetime.
+
+The parent's current Fast preference is inherited before launch, continuation/recovery, and supervisor replies. Off explicitly clears inherited Fast state; unsupported child models silently ignore Fast. Changes during an assigned task take effect at the next boundary, not immediately. Inheritance is limited to managed subagents, not independent sessions or background model calls. If Fast is on but the child lacks its update command, the operation fails before starting or resuming model work.
 
 Parent shutdown stops child processes. Resume and `/reload` preserve reusable children through saved sessions under `<agent-dir>/subagents`; processes reopen on continuation. Interrupted tasks—including pending supervisor questions—need explicit continuation rather than a reply. Failed and cancelled children with usable saved sessions can recover through an explicit `subagent_continue` after considering the interruption. Recovery reopens the session with the current parent approval policy and includes a brief note that the previous attempt was interrupted and may have produced side effects; it does not retry automatically or switch models. Status reports recovery eligibility and the saved session path. Protocol or approval-policy failures and missing/unreadable sessions cannot be recovered.
 

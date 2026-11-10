@@ -1,6 +1,8 @@
 export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_TOKEN_ENV = "PI_SUBAGENT_TOKEN";
 export const SUBAGENT_TASK_COMMAND = "_subagent-task";
+export const SUBAGENT_FAST_COMMAND = "_subagent-fast";
+export const FAST_MODE_STATE_CHANNEL = "fast-mode:get-state";
 // Bump for incompatible wire-format or approval-policy changes, not releases.
 export const SUBAGENT_PROTOCOL_VERSION = 1;
 export const SUBAGENT_PROTOCOL_ENV = "PI_SUBAGENT_PROTOCOL_VERSION";
@@ -63,6 +65,10 @@ export function parseAutoApproveStat(message: string, token: string): AutoApprov
 
 export function taskPolicyAck(token: string, mode: string): string {
 	return `${marker("pi-subagent-task-policy", token)}${mode}`;
+}
+
+export function fastModeAck(token: string, enabled: boolean): string {
+	return `${marker("pi-subagent-fast", token)}${enabled ? "on" : "off"}`;
 }
 
 export function questionTitle(token: string): string {

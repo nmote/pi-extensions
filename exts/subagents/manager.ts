@@ -11,6 +11,8 @@ import {
 	parseApprovalTitle,
 	parseAutoApproveStat,
 	SUBAGENT_TASK_COMMAND,
+	SUBAGENT_FAST_COMMAND,
+	fastModeAck,
 	SUBAGENT_HANDSHAKE_COMMAND,
 	SUBAGENT_PROTOCOL_ENV,
 	SUBAGENT_PROTOCOL_VERSION,
@@ -257,6 +259,8 @@ class SubagentRun {
 	private childProtocolVersion?: string;
 	private expectedPolicyAck?: string;
 	private policyAcknowledged = false;
+	private expectedFastAck?: string;
+	private fastAcknowledged = false;
 	private preparingTask = false;
 	private checkpoint?: { promise: Promise<SubagentSnapshot>; resolve: (snapshot: SubagentSnapshot) => void };
 	private status: SubagentStatus = "starting";
@@ -285,6 +289,7 @@ class SubagentRun {
 		private readonly routeUi: (run: SubagentRun, request: RpcExtensionUIRequest) => Promise<void>,
 		private readonly onStatusChange: () => void,
 		private readonly onStateChange: () => void,
+		private readonly getFastMode: () => boolean,
 		state?: PersistedSubagentRun,
 	) {
 		this.id = id;
@@ -436,11 +441,14 @@ class SubagentRun {
 			this.rpc = this.createRpc();
 			await this.rpc.start(this.buildArguments());
 			if (!this.isStopped()) await this.handshake();
+			this.preparingTask = true;
+			if (!this.isStopped()) await this.syncFastPreference();
 			if (this.isStopped()) {
 				await this.rpc.stop();
 				await this.cleanupPrompt();
 				return checkpoint;
 			}
+			this.preparingTask = false;
 			this.setStatus("running");
 			this.setPhase("starting model");
 			this.emitUpdate();
@@ -509,6 +517,8 @@ class SubagentRun {
 			if (response.data?.disposition !== "handled" || !this.policyAcknowledged) {
 				throw new SubagentFailure("Subagent approval policy update was not acknowledged", "policy");
 			}
+			await this.syncFastPreference();
+			if (!this.isRunning()) return checkpoint;
 			this.setPhase("starting model");
 			this.emitUpdate();
 			this.preparingTask = false;
@@ -523,22 +533,26 @@ class SubagentRun {
 	}
 
 	async reply(answer: string, hooks: OperationHooks): Promise<SubagentSnapshot> {
-		if (this.status !== "waiting" || !this.pendingQuestion || !this.rpc) {
+		if (this.status !== "waiting" || this.preparingTask || !this.pendingQuestion || !this.rpc) {
 			throw new Error(`Subagent ${this.id} is not waiting for a supervisor reply`);
 		}
-		this.hooks = hooks;
+		const rpc = this.rpc;
 		const requestId = this.pendingQuestion.requestId;
 		const checkpoint = this.armCheckpoint();
+		this.hooks = hooks;
+		this.preparingTask = true;
 		try {
-			this.rpc.sendUiResponse({ type: "extension_ui_response", id: requestId, value: answer });
+			await this.syncFastPreference();
+			if (this.isStopped() || this.rpc !== rpc) return checkpoint;
+			this.preparingTask = false;
+			rpc.sendUiResponse({ type: "extension_ui_response", id: requestId, value: answer });
+			this.pendingQuestion = undefined;
+			this.setStatus("running");
+			this.setPhase("resuming with supervisor answer");
+			this.emitUpdate();
 		} catch (error) {
-			this.fail(error instanceof Error ? error.message : String(error));
-			return checkpoint;
+			this.fail(error instanceof Error ? error.message : String(error), error instanceof SubagentFailure ? error.kind : "process");
 		}
-		this.pendingQuestion = undefined;
-		this.setStatus("running");
-		this.setPhase("resuming with supervisor answer");
-		this.emitUpdate();
 		return checkpoint;
 	}
 
@@ -591,6 +605,38 @@ class SubagentRun {
 			throw new SubagentFailure(message.startsWith("Timed out") ? "Subagent protocol handshake timed out. Restart the subagent; if it persists, reload the parent session." : message, "protocol");
 		} finally {
 			this.expectedProtocolAck = undefined;
+		}
+	}
+
+	private async syncFastPreference(): Promise<void> {
+		const rpc = this.rpc;
+		if (!rpc || this.isStopped()) return;
+		try {
+			const commands = await rpc.send({ type: "get_commands" });
+			if (this.isStopped() || this.rpc !== rpc) return;
+			const enabled = this.getFastMode();
+			const available = commands.data?.commands?.some((command: { name: string; source?: string }) =>
+				command.name === SUBAGENT_FAST_COMMAND && command.source === "extension");
+			if (!available) {
+				if (enabled) throw new SubagentFailure("Subagent Fast mode command is unavailable. Load fast-mode in the child, then restart the subagent.", "protocol");
+				return;
+			}
+			this.expectedFastAck = fastModeAck(this.token, enabled);
+			this.fastAcknowledged = false;
+			const response = await rpc.send({
+				type: "prompt",
+				message: `/${SUBAGENT_FAST_COMMAND} ${this.token} ${enabled ? "on" : "off"}`,
+			});
+			await rpc.flushEvents();
+			if (this.isStopped() || this.rpc !== rpc) return;
+			if (response.data?.disposition !== "handled" || !this.fastAcknowledged) {
+				throw new SubagentFailure("Subagent Fast mode update was not acknowledged. Run /reload in the parent, then restart the subagent.", "protocol");
+			}
+		} catch (error) {
+			if (error instanceof SubagentFailure) throw error;
+			throw new SubagentFailure(`Subagent Fast mode update failed: ${error instanceof Error ? error.message : String(error)}`, "protocol");
+		} finally {
+			this.expectedFastAck = undefined;
 		}
 	}
 
@@ -762,6 +808,10 @@ class SubagentRun {
 				this.policyAcknowledged = true;
 				return;
 			}
+			if (request.method === "notify" && (request.message === fastModeAck(this.token, true) || request.message === fastModeAck(this.token, false))) {
+				if (request.message === this.expectedFastAck) this.fastAcknowledged = true;
+				return;
+			}
 			if (request.method === "editor" && isQuestionTitle(request.title, this.token)) {
 				this.pendingQuestion = { requestId: request.id, question: parseQuestion(request.prefill) };
 				this.setStatus("waiting");
@@ -911,6 +961,7 @@ class SubagentRun {
 
 export interface SubagentManagerOptions {
 	invocation?: PiInvocation;
+	getFastMode?: () => boolean;
 	onLiveCountChange?: (count: number) => void;
 	onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
 	onGuidanceRequest?: (request: GuidanceRequest, ctx: ExtensionContext) => Promise<ApprovalGuidance>;
@@ -921,6 +972,7 @@ export interface SubagentManagerOptions {
 export class SubagentManager {
 	private readonly runs = new Map<string, SubagentRun>();
 	private readonly invocation: PiInvocation;
+	private readonly getFastMode: () => boolean;
 	private readonly onLiveCountChange?: (count: number) => void;
 	private lastLiveCount = 0;
 	private readonly onAutoApproveStat?: (stat: AutoApproveStat, runId: string) => void;
@@ -932,6 +984,7 @@ export class SubagentManager {
 
 	constructor(options: SubagentManagerOptions = {}) {
 		this.invocation = options.invocation ?? resolvePiInvocation();
+		this.getFastMode = options.getFastMode ?? (() => false);
 		this.onLiveCountChange = options.onLiveCountChange;
 		this.onAutoApproveStat = options.onAutoApproveStat;
 		this.onGuidanceRequest = options.onGuidanceRequest;
@@ -944,7 +997,7 @@ export class SubagentManager {
 			const run = new SubagentRun(
 				state.snapshot.id, state.task, state.parentCwd, this.invocation,
 				(current, request) => this.enqueueUserUi(current, request),
-				() => this.publishLiveCount(), () => this.publishState(), state,
+				() => this.publishLiveCount(), () => this.publishState(), this.getFastMode, state,
 			);
 			this.runs.set(run.id, run);
 		}
@@ -982,7 +1035,7 @@ export class SubagentManager {
 			const run = new SubagentRun(
 				this.createRunId(), task, canonicalParentCwd, this.invocation,
 				(current, request) => this.enqueueUserUi(current, request),
-				() => this.publishLiveCount(), () => this.publishState(),
+				() => this.publishLiveCount(), () => this.publishState(), this.getFastMode,
 			);
 			this.runs.set(run.id, run);
 			return run;

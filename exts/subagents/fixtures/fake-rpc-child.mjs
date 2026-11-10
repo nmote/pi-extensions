@@ -6,11 +6,15 @@ const sessionDir = args[args.indexOf("--session-dir") + 1];
 const sessionFile = args.includes("--session") ? args[args.indexOf("--session") + 1] : join(sessionDir, `fake_${args[args.indexOf("--session-id") + 1]}.jsonl`);
 const sessionId = args.includes("--session") ? JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]).id : args[args.indexOf("--session-id") + 1];
 const token = process.env.PI_SUBAGENT_TOKEN;
+let fastBehavior = args.includes("--fake-fast") ? args[args.indexOf("--fake-fast") + 1] : "normal";
+// Exercise explicit off updates against an enabled child.
+let fastEnabled = true;
+const fastUpdates = [];
 let pending;
 let guidanceDialog;
 let mode;
 let acknowledgePolicy = process.env.FAKE_POLICY !== "no-ack";
-let slowDiscovery = false;
+let slowDiscovery = fastBehavior === "slow-discovery";
 let slowPolicy = false;
 let straySettlement = false;
 let contextTokens = 60_000;
@@ -75,7 +79,12 @@ function processLine(line) {
 		return;
 	}
 	if (command.type === "get_commands") {
-		const respond = () => send({ id: command.id, type: "response", command: "get_commands", success: true, data: { commands: [{ name: "_subagent-task" }, ...(process.env.FAKE_PROTOCOL === "legacy" ? [] : [{ name: "_subagent-handshake" }])] } });
+		const commands = [
+			{ name: "_subagent-task" },
+			...(process.env.FAKE_PROTOCOL === "legacy" ? [] : [{ name: "_subagent-handshake" }]),
+			...(fastBehavior === "missing" ? [] : [{ name: "_subagent-fast", source: fastBehavior === "template" ? "prompt" : "extension" }]),
+		];
+		const respond = () => send({ id: command.id, type: "response", command: "get_commands", success: true, data: { commands } });
 		if (slowDiscovery) {
 			send({ type: "extension_ui_request", id: "discovery-pause", method: "notify", message: "discovering task policy" });
 			setTimeout(respond, 25);
@@ -88,6 +97,24 @@ function processLine(line) {
 			if (process.env.PI_SUBAGENT_PROTOCOL_VERSION !== "1") throw new Error("Parent protocol environment missing");
 			if (version !== "no-ack") send({ type: "extension_ui_request", id: "protocol-ack", method: "notify", message: `[[pi-subagent-protocol:${token}]]${version}` });
 			send({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "handled" } });
+			return;
+		}
+		if (command.message.startsWith("/_subagent-fast ")) {
+			const [, suppliedToken, requestedFast] = command.message.split(" ");
+			const respond = () => {
+				if (suppliedToken === token) {
+					fastEnabled = requestedFast === "on";
+					fastUpdates.push(fastEnabled);
+					const ackToken = fastBehavior === "wrong-token" ? `${token}-wrong` : token;
+					const ackEnabled = fastBehavior === "wrong-state" ? !fastEnabled : fastEnabled;
+					if (fastBehavior !== "no-ack") send({ type: "extension_ui_request", id: "fast-ack", method: "notify", message: `[[pi-subagent-fast:${ackToken}]]${ackEnabled ? "on" : "off"}` });
+				}
+				send({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: fastBehavior === "unhandled" ? "started" : "handled" } });
+			};
+			if (fastBehavior === "slow") {
+				send({ type: "extension_ui_request", id: "fast-pause", method: "notify", message: "updating Fast preference" });
+				setTimeout(respond, 50);
+			} else respond();
 			return;
 		}
 		if (command.message.startsWith("/_subagent-task ")) {
@@ -109,6 +136,8 @@ function processLine(line) {
 		if (command.message.includes("slow discovery")) slowDiscovery = true;
 		if (command.message.includes("slow policy")) slowPolicy = true;
 		if (command.message.includes("stray settlement")) straySettlement = true;
+		if (command.message.includes("slow fast")) fastBehavior = "slow";
+		if (command.message.includes("no fast ack")) fastBehavior = "no-ack";
 		contextStatsAvailable = command.message !== "Task: no context stats";
 		terminalError = undefined;
 		history.push({ role: "user", text: command.message });
@@ -120,7 +149,7 @@ function processLine(line) {
 		send({ type: "message_update", message: assistant(""), assistantMessageEvent: { type: "thinking_start" } });
 		if (command.message.startsWith("Task: hang")) return;
 		if (command.message.startsWith("Task: recall")) {
-			finish(JSON.stringify({ pid: process.pid, history, cwd: process.cwd(), args: process.argv.slice(2), mode }));
+			finish(JSON.stringify({ pid: process.pid, history, cwd: process.cwd(), args: process.argv.slice(2), mode, fastEnabled, fastUpdates }));
 			return;
 		}
 		if (command.message.startsWith("Task: unsolicited idle")) {
@@ -241,7 +270,7 @@ function processLine(line) {
 		if (command.message.startsWith("Task: ask")) {
 			send({ type: "message_end", message: assistant("") });
 			reportAutoApproveStat("evaluatorAllows");
-			pending = "question";
+			pending = command.message.startsWith("Task: ask fast") ? "fast-question" : "question";
 			send({
 				type: "extension_ui_request",
 				id: "question-1",
@@ -276,7 +305,8 @@ function processLine(line) {
 		if (pending === "compaction") {
 			contextTokens = 20_000;
 			finish("compacted");
-		} else if (pending === "question") finish(`answer: ${command.value ?? "cancelled"}`);
+		} else if (pending === "fast-question") finish(JSON.stringify({ answer: command.value, fastEnabled, fastUpdates, mode }));
+		else if (pending === "question") finish(`answer: ${command.value ?? "cancelled"}`);
 		else if (pending === "approval") {
 			if (typeof command.value === "string" && command.value.startsWith("Approve")) {
 				reportAutoApproveStat("humanApprovals");
