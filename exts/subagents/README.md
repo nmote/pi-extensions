@@ -13,7 +13,7 @@ Delegates focused work to isolated Pi children that can ask their parent for gui
 ## Agent tools
 
 - `list_subagents` — List named-agent definitions and discovery errors without a model call; the parent must read this result before selecting a named agent. Configure definitions through [agent-config](../agent-config/README.md).
-- `subagent` — Start one task or up to eight concurrent tasks, optionally choosing a named agent, model, thinking level, and cwd. A different cwd requires your direct approval.
+- `subagent` — Start one task or up to eight concurrent tasks, optionally choosing a named agent, model, thinking level, and cwd. Only paths outside the parent's directory tree require your direct approval, after resolving symlinks.
 - `subagent_continue` — Give an idle, failed, or cancelled child with a usable saved session a related task while retaining its context.
 - `subagent_reply` — Answer a waiting child's question and resume it.
 - `subagent_status` — Inspect a child by ID, or omit the ID to inspect all children.

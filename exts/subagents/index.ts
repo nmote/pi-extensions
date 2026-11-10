@@ -67,7 +67,7 @@ const REPLIED_PHASE = "supervisor replied; continued in subagent_reply";
 const TaskFields = {
 	task: Type.String({ minLength: 1, description: "Specific task to delegate" }),
 	agent: Type.Optional(Type.String({ description: "Named agent to use; omit for a general subagent" })),
-	cwd: Type.Optional(Type.String({ description: "Working directory; relative paths resolve from the parent cwd; a different cwd requires user approval" })),
+	cwd: Type.Optional(Type.String({ description: "Working directory; relative paths resolve from the parent cwd; paths outside its directory tree require user approval" })),
 	model: Type.Optional(Type.String({ description: "Model as provider/id or an unambiguous model pattern" })),
 	thinkingLevel: Type.Optional(Type.Enum(THINKING_LEVELS, { type: "string", description: "Subagent thinking level" })),
 };
@@ -403,7 +403,7 @@ export default function subagents(pi: ExtensionAPI): void {
 				"Do not use subagent to repeat a review unless later work materially changes the behavior or risk reviewed. Scope each task to the concrete question and relevant files or functions.",
 				"Reuse an idle, failed, or cancelled subagent with a usable saved session via subagent_continue so it retains context; consider the interruption before retrying. Use subagent_cancel to end it when finished.",
 				"When subagent reports a supervisor question, answer it yourself when existing context is sufficient; otherwise ask the user, then call subagent_reply with their answer.",
-				"Subagent runs with a different working directory require direct user approval.",
+				"Subagent runs outside the parent's working directory tree require direct user approval.",
 				"Do not run parallel write-capable subagent tasks in the same worktree unless their changes are explicitly partitioned.",
 				...policy.guidelines,
 			],

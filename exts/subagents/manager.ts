@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir, SessionManager, type ContextUsage, type ExtensionContext, type RpcExtensionUIRequest } from "@earendil-works/pi-coding-agent";
 import {
@@ -1029,7 +1029,7 @@ export class SubagentManager {
 			Promise.all(tasks.map(async (task) => ({ ...task, cwd: await canonicalDirectory(task.cwd, parentCwd) }))),
 		]);
 		this.ensureCanStart(startSignal);
-		await this.approveDifferentWorkingDirectories(canonicalTasks, canonicalParentCwd, ctx, startSignal);
+		await this.approveExternalWorkingDirectories(canonicalTasks, canonicalParentCwd, ctx, startSignal);
 		this.ensureCanStart(startSignal);
 		const runs = canonicalTasks.map((task) => {
 			const run = new SubagentRun(
@@ -1159,28 +1159,31 @@ export class SubagentManager {
 		if (signal.aborted) throw new Error("Subagent start was cancelled");
 	}
 
-	private async approveDifferentWorkingDirectories(
+	private async approveExternalWorkingDirectories(
 		tasks: ResolvedSubagentTask[],
 		parentCwd: string,
 		ctx: ExtensionContext,
 		signal: AbortSignal,
 	): Promise<void> {
-		const differentCwdTasks = tasks.filter((task) => task.cwd !== parentCwd);
-		if (!differentCwdTasks.length) return;
+		const externalTasks = tasks.filter((task) => {
+			const path = relative(parentCwd, task.cwd);
+			return path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path);
+		});
+		if (!externalTasks.length) return;
 
-		const directories = [...new Set(differentCwdTasks.map((task) => task.cwd))];
+		const directories = [...new Set(externalTasks.map((task) => task.cwd))];
 		const directoryList = directories.map((path) => JSON.stringify(path)).join(", ");
 		if (!ctx.hasUI) {
 			throw new Error(`Subagent working directory requires user approval, but no user UI is available: ${directoryList}`);
 		}
 
-		const requestedRuns = differentCwdTasks
+		const requestedRuns = externalTasks
 			.map((task) => `- ${task.agent}: ${JSON.stringify(task.cwd)}\n  Task:\n${formatTaskForApproval(task.task)}`)
 			.join("\n");
 		const confirmed = await this.enqueueDialog(
 			() => ctx.ui.confirm(
 				"Subagent working directory approval required",
-				`Allow ${differentCwdTasks.length === 1 ? "this subagent" : "these subagents"} to use a working directory different from the parent for this parent session, including follow-up tasks?\n\nParent working directory:\n${JSON.stringify(parentCwd)}\n\nRequested runs:\n${requestedRuns}`,
+				`Allow ${externalTasks.length === 1 ? "this subagent" : "these subagents"} to use a working directory outside the parent's directory tree for this parent session, including follow-up tasks?\n\nParent working directory:\n${JSON.stringify(parentCwd)}\n\nRequested runs:\n${requestedRuns}`,
 				{ signal },
 			),
 			signal,

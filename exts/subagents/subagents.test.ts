@@ -892,13 +892,34 @@ try {
 			workingDirectoryApprovalMessage.includes(`- general: ${JSON.stringify(canonicalHome)}\n  Task:\n    ${crossDirectoryTask.replaceAll("\n", "\n    ")}`),
 	);
 
+	const cwdParent = join(agentDir, "cwd-parent");
+	const cwdChild = join(cwdParent, "child");
+	const cwdSibling = `${cwdParent}-sibling`;
+	await Promise.all([mkdir(cwdChild, { recursive: true }), mkdir(cwdSibling)]);
+	await Promise.all([
+		symlink(cwdChild, join(cwdParent, "inside"), "dir"),
+		symlink(cwdSibling, join(cwdParent, "outside"), "dir"),
+	]);
+	const canonicalChild = await realpath(cwdChild);
+	const canonicalSibling = await realpath(cwdSibling);
+	const nestedDirectories = makeManager();
+	for (const [cwd, hasUI] of [["./child", true], ["./inside", false]] as const) {
+		let approvalCalls = 0;
+		const [result] = await nestedDirectories.start(
+			[{ ...task("cwd"), cwd }],
+			cwdParent,
+			context({ hasUI, confirm: async () => { approvalCalls++; return false; } }),
+		);
+		check(`nested cwd ${cwd} runs without approval (hasUI=${hasUI})`, approvalCalls === 0 && result?.status === "idle" && result.output === canonicalChild);
+	}
+
 	const deniedDifferentDirectory = makeManager();
-	const longDeniedTask = `Inspect the nested working directory.\n${"Include every detail. ".repeat(100)}`;
+	const longDeniedTask = `Inspect the external working directory.\n${"Include every detail. ".repeat(100)}`;
 	let deniedDifferentDirectoryCalls = 0;
 	let deniedDifferentDirectoryMessage = "";
 	const deniedDifferentDirectoryError = await errorMessage(deniedDifferentDirectory.start(
-		[task("same cwd"), { ...task(longDeniedTask), cwd: join(testDir, "fixtures") }],
-		process.cwd(),
+		[{ ...task("same cwd"), cwd: "." }, { ...task("nested cwd"), cwd: "./child" }, { ...task(longDeniedTask), cwd: cwdSibling }],
+		cwdParent,
 		context({
 			confirm: async (_title, message) => {
 				deniedDifferentDirectoryCalls++;
@@ -908,22 +929,25 @@ try {
 		}),
 	));
 	check(
-		"nested working directories also require approval",
+		"external working directories require approval",
 		deniedDifferentDirectoryCalls === 1 && deniedDifferentDirectoryError.includes("was not approved"),
 	);
 	check(
 		"working-directory approval includes complete long task prompts",
-		deniedDifferentDirectoryMessage.includes(`- general: ${JSON.stringify(join(testDir, "fixtures"))}\n  Task:\n    ${longDeniedTask.replaceAll("\n", "\n    ")}`),
+		deniedDifferentDirectoryMessage.includes(`- general: ${JSON.stringify(canonicalSibling)}\n  Task:\n    ${longDeniedTask.replaceAll("\n", "\n    ")}`) &&
+			!deniedDifferentDirectoryMessage.includes("    nested cwd"),
 	);
 	check("denied batch approval starts no children", deniedDifferentDirectory.status().length === 0);
 
 	const headlessCrossDirectory = makeManager();
-	const headlessCrossDirectoryError = await errorMessage(headlessCrossDirectory.start(
-		[{ ...task("done"), cwd: "~" }],
-		process.cwd(),
-		context({ hasUI: false }),
-	));
-	check("cross-directory runs fail closed without a user UI", headlessCrossDirectoryError.includes("no user UI is available"));
+	for (const cwd of ["..", "../cwd-parent-sibling", "./outside"]) {
+		const message = await errorMessage(headlessCrossDirectory.start(
+			[{ ...task("done"), cwd }],
+			cwdParent,
+			context({ hasUI: false }),
+		));
+		check(`external cwd ${cwd} fails closed without a user UI`, message.includes("no user UI is available") && headlessCrossDirectory.status().length === 0);
+	}
 
 	const abortedWorkingDirectory = makeManager();
 	const abortController = new AbortController();
