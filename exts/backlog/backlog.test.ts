@@ -281,13 +281,27 @@ async function main(): Promise<void> {
 				progressParent.body.includes(`descendant ${addedId(progressResults[0])} is in_progress`) &&
 				!progressParent.body.includes("Marked approved."),
 		);
+		const appendContext = { ...context, now: new Date("2026-01-01T00:00:00Z") };
+		const logOverhead = Buffer.byteLength(`\n\n## Log\n\n### 2026-01-01T00:00:00Z (session ${context.sessionId})\n\n`);
+		const nearLimit = addedId((await runBacklogOperations(advice, [{
+			action: "add", title: "Near limit", body: "x".repeat(MAX_BODY_BYTES - logOverhead - 6) + "é",
+		}], appendContext))[0]);
+		const append = (text: string) => runBacklogOperations(advice, [{ action: "append", id: nearLimit, text }], appendContext);
+		check(
+			"append overflow reports the UTF-8 budget after log overhead and suggests child items",
+			await rejects(append("ééx"), /Append at most 4 UTF-8 bytes.*distinct work items.*children/) &&
+				(await append("éé"))[0]?.startsWith(`appended to ${nearLimit} `) === true &&
+				await rejects(append("x"), /Nothing was saved\. Read the item and `update` the body/),
+		);
+
 		const fullPlan = addedId((await runBacklogOperations(advice,
 			[{ action: "add", title: "Full log", body: "x".repeat(MAX_BODY_BYTES) }], context))[0]);
 		const beforeFailure = readdirSync(advice.dir).sort().join();
 		check(
-			"an automatic parent log failure rolls back the entire batch",
+			"an automatic parent log failure identifies the full parent and rolls back the entire batch",
 			await rejects(runBacklogOperations(advice,
-				[{ action: "add", title: "Working task", parent: fullPlan, status: "in_progress" }], context), /body would exceed/) &&
+				[{ action: "add", title: "Working task", parent: fullPlan, status: "in_progress" }], context),
+				new RegExp(`Backlog item ${fullPlan} would exceed 50,000 bytes\\. Nothing was saved\\. Read the item`)) &&
 				readdirSync(advice.dir).sort().join() === beforeFailure &&
 				parseItem(fullPlan, readFileSync(advice.itemPath(fullPlan), "utf8")).status === "open",
 		);
@@ -315,7 +329,7 @@ async function main(): Promise<void> {
 		const ancestorFiles = readdirSync(ancestors.dir).sort().join();
 		check("an ancestor log failure rolls back child creation and all ancestor changes",
 			await rejects(runBacklogOperations(ancestors,
-				[{ action: "add", title: "Leaf", parent: blockedMiddle, status: "in_progress" }], context), /body would exceed/) &&
+				[{ action: "add", title: "Leaf", parent: blockedMiddle, status: "in_progress" }], context), /would exceed 50,000 bytes/) &&
 				parseItem(blockedMiddle, readFileSync(ancestors.itemPath(blockedMiddle), "utf8")).status === "open" &&
 				parseItem(blockedTop, readFileSync(ancestors.itemPath(blockedTop), "utf8")).status === "open" &&
 				readdirSync(ancestors.dir).sort().join() === ancestorFiles);

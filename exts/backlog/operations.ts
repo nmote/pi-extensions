@@ -307,10 +307,30 @@ function readItem(snapshot: StoreSnapshot, stored: StoredItem): string {
 	return item.body ? `${lines.join("\n")}\n\n${item.body}` : lines.join("\n");
 }
 
-function appendLog(body: string, text: string, now: string, sessionId: string | undefined): string {
+function appendLog(
+	{ id, body }: BacklogItem,
+	text: string,
+	now: string,
+	sessionId: string | undefined,
+	action: "append" | "add" | "update",
+): string {
 	const log = /^## Log$/m.test(body) ? body : `${body}${body ? "\n\n" : ""}## Log`;
 	const heading = `### ${now}${sessionId ? ` (session ${sessionId})` : ""}`;
-	return `${log}\n\n${heading}\n\n${text.trim()}`;
+	const prefix = `${log}\n\n${heading}\n\n`;
+	const entry = text.trim();
+	const available = MAX_BODY_BYTES - bytes(prefix);
+	if (bytes(entry) > available) {
+		let recovery = "Read the item and `update` the body to summarize older logs.";
+		if (action === "add") recovery = "Shorten the body and retry.";
+		else if (action === "append" && available > 0) {
+			recovery = `Append at most ${available} UTF-8 bytes, or \`read\` the item and \`update\` the body to summarize older logs.`;
+		}
+		throw new Error(
+			`Backlog item ${id} would exceed ${MAX_BODY_BYTES.toLocaleString("en-US")} bytes. Nothing was saved. ${recovery} ` +
+			"If the plan contains distinct work items, propose tracking them as children and keep the overall plan in the parent.",
+		);
+	}
+	return prefix + entry;
 }
 
 /** Validates the whole batch, applies it in memory, and writes only if every operation succeeds. */
@@ -377,9 +397,8 @@ export async function runBacklogOperations(
 			assert(!reaches(ids, item.id, dependenciesOf), `${item.id} cannot depend on itself or on items that depend on it`);
 			item.dependsOn = ids;
 		};
-		const logApproval = (item: BacklogItem): void => {
-			item.body = appendLog(item.body, "Marked approved.", now, context.sessionId);
-			assert(bytes(item.body) <= MAX_BODY_BYTES, `backlog item body would exceed ${MAX_BODY_BYTES} bytes`);
+		const logApproval = (item: BacklogItem, action: "add" | "update"): void => {
+			item.body = appendLog(item, "Marked approved.", now, context.sessionId, action);
 		};
 
 		for (const operation of resolved) {
@@ -404,7 +423,7 @@ export async function runBacklogOperations(
 					};
 					if (operation.parent !== undefined) setParent(item, operation.parent as string);
 					if (operation.dependsOn !== undefined) setDependsOn(item, operation.dependsOn as string[]);
-					if (item.status === "approved") logApproval(item);
+					if (item.status === "approved") logApproval(item, "add");
 					if (isTerminal(item)) terminalTransitions.add(id);
 					if (item.status === "approved" || item.status === "in_progress" || item.status === "done") startedChildren.add(id);
 					lines.push(`added ${id} (revision ${save(item)})`);
@@ -426,7 +445,7 @@ export async function runBacklogOperations(
 					if (operation.repos !== undefined) item.repos = operation.repos as string[];
 					if (operation.parent !== undefined) setParent(item, operation.parent as string);
 					if (operation.dependsOn !== undefined) setDependsOn(item, operation.dependsOn as string[]);
-					if (stored.item.status !== "approved" && item.status === "approved") logApproval(item);
+					if (stored.item.status !== "approved" && item.status === "approved") logApproval(item, "update");
 					if (!isTerminal(stored.item) && isTerminal(item)) terminalTransitions.add(item.id);
 					if (operation.status === "approved" || operation.status === "in_progress" || operation.status === "done") startedChildren.add(item.id);
 					lines.push(`updated ${item.id} (revision ${save(item)})`);
@@ -439,8 +458,7 @@ export async function runBacklogOperations(
 				}
 				case "append": {
 					const stored = existing(operation.id as string);
-					const body = appendLog(stored.item.body, operation.text as string, now, context.sessionId);
-					assert(bytes(body) <= MAX_BODY_BYTES, `backlog item body would exceed ${MAX_BODY_BYTES} bytes`);
+					const body = appendLog(stored.item, operation.text as string, now, context.sessionId, "append");
 					lines.push(`appended to ${stored.item.id} (revision ${save({ ...stored.item, body, updated: now })})`);
 					break;
 				}
@@ -477,12 +495,12 @@ export async function runBacklogOperations(
 				parentId = parent.parent;
 				if (parent.status !== "open") continue;
 				const body = appendLog(
-					parent.body,
+					parent,
 					`Marked in_progress because descendant ${child.id} is ${child.status}. This tracks progress, not approval; it does not authorize the parent’s plan or other children.`,
 					now,
 					context.sessionId,
+					"update",
 				);
-				assert(bytes(body) <= MAX_BODY_BYTES, `backlog item body would exceed ${MAX_BODY_BYTES} bytes`);
 				const revision = save({ ...parent, status: "in_progress", body, updated: now });
 				lines.push(
 					`Marked parent ${parent.id} in_progress to reflect descendant ${child.id} progress (revision ${revision}). This does not approve or authorize additional work.`,
