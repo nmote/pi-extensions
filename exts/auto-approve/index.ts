@@ -93,7 +93,6 @@ const builtinRoots = loadBuiltinRoots();
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const APPROVAL_TOOL = "request_tool_approval";
 const INLINE_SCRIPT_GUIDELINE = "Run small ad-hoc scripts inline using a quoted heredoc (e.g. `python3 - <<'EOF'`) rather than writing and executing a temporary script, so the approval evaluator can inspect the full body. Prefer `edit` for small, targeted file changes.";
-const APPROVAL_REQUEST_TTL_MS = 10 * 60 * 1000;
 const MEMO_ENTRY = "auto-approve-memo";
 const HUMAN_DENY_ENTRY = "auto-approve-human-deny";
 const MODE_ENTRY = "auto-approve-mode";
@@ -110,7 +109,6 @@ interface PendingApproval {
 	input: MatchInput;
 	cwd: string;
 	reason: string;
-	expiresAt: number;
 }
 
 function emptyStats(): Stats {
@@ -515,11 +513,6 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		record("softRejections", ctx);
 		if (evaluatorFailure) record("evaluatorFailures", ctx);
 
-		const now = Date.now();
-		for (const [id, pending] of pendingApprovals) {
-			if (pending.expiresAt <= now) pendingApprovals.delete(id);
-		}
-
 		const key = approvalKey(toolName, rawInput, ctx.cwd);
 		let id: string | undefined;
 		if (key) {
@@ -530,7 +523,6 @@ export default function autoApprove(pi: ExtensionAPI): void {
 				input: { ...input, raw: structuredClone(rawInput) },
 				cwd: ctx.cwd,
 				reason,
-				expiresAt: now + APPROVAL_REQUEST_TTL_MS,
 			});
 			id = JSON.stringify(requestId);
 		}
@@ -601,10 +593,9 @@ export default function autoApprove(pi: ExtensionAPI): void {
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const pending = pendingApprovals.get(params.requestId);
-			if (!pending || pending.expiresAt <= Date.now()) {
-				pendingApprovals.delete(params.requestId);
+			if (!pending) {
 				return {
-					content: [{ type: "text", text: "This approval request is invalid or expired. Reconsider the action before attempting it again." }],
+					content: [{ type: "text", text: "This approval request is invalid. Reconsider the action before attempting it again." }],
 					details: {},
 				};
 			}

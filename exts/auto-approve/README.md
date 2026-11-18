@@ -19,7 +19,7 @@ Ctrl+Alt+A cycles modes; `--auto` overrides the startup mode.
 
 ## Agent tools
 
-- `request_tool_approval` — Ask the user to approve an exact rejected call using its returned `requestId`, when no safer approach works.
+- `request_tool_approval` — Ask the user to approve an exact rejected call using its returned `requestId`, when no safer approach works. IDs are single-use, have no time limit, and are cleared on session shutdown/start or managed subagent task boundaries.
 
 ## Configuration
 

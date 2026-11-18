@@ -333,14 +333,24 @@ async function main(): Promise<void> {
 			Object.isFrozen(retryEvent.input) && Object.getOwnPropertyDescriptor(retryEvent, "input")?.writable === false,
 		);
 
-		const parallelA = await gate({ toolName: "bash", input: { command } }, ctx);
-		const parallelB = await gate({ toolName: "bash", input: { command } }, ctx);
-		const parallelIdA = /requestId "([^"]+)"/.exec(parallelA?.reason ?? "")?.[1];
-		const parallelIdB = /requestId "([^"]+)"/.exec(parallelB?.reason ?? "")?.[1];
-		await approvalTool.execute("approval-2", { requestId: parallelIdA, justification: "First call" }, undefined, undefined, ctx);
-		await approvalTool.execute("approval-3", { requestId: parallelIdB, justification: "Second call" }, undefined, undefined, ctx);
-		check("two exact approvals grant two retries", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
-		check("exact approval count is not collapsed", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
+		const originalNow = Date.now;
+		try {
+			const parallelA = await gate({ toolName: "bash", input: { command } }, ctx);
+			const later = originalNow() + 24 * 60 * 60 * 1000;
+			Date.now = () => later;
+			const parallelB = await gate({ toolName: "bash", input: { command } }, ctx);
+			const parallelIdA = /requestId "([^"]+)"/.exec(parallelA?.reason ?? "")?.[1];
+			const parallelIdB = /requestId "([^"]+)"/.exec(parallelB?.reason ?? "")?.[1];
+			const delayed = await approvalTool.execute("approval-2", { requestId: parallelIdA, justification: "First call" }, undefined, undefined, ctx);
+			check("approval requests survive elapsed time and further rejections", delayed.content[0].text.startsWith("Approved once"));
+			const reused = await approvalTool.execute("approval-reused", { requestId: parallelIdA, justification: "First call" }, undefined, undefined, ctx);
+			check("approval request IDs are single-use", reused.content[0].text.includes("invalid"));
+			await approvalTool.execute("approval-3", { requestId: parallelIdB, justification: "Second call" }, undefined, undefined, ctx);
+			check("two exact approvals grant two retries", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
+			check("exact approval count is not collapsed", (await gate({ toolName: "bash", input: { command } }, ctx)) === undefined);
+		} finally {
+			Date.now = originalNow;
+		}
 
 		const cancellable = await gate({ toolName: "bash", input: { command } }, ctx);
 		const cancellableId = /requestId "([^"]+)"/.exec(cancellable?.reason ?? "")?.[1];
@@ -587,8 +597,8 @@ async function main(): Promise<void> {
 		const pendingId = /requestId "([^"]+)"/.exec(pendingCall.reason)?.[1];
 		beginTask("auto");
 		check("one-shot allowance expires at task boundary", (await gate(oneShotCall, ctx))?.block === true);
-		const expired = await approvalTool.execute("old-task", { requestId: pendingId, justification: "needed" }, undefined, undefined, ctx);
-		check("old task approval requests expire", expired.content[0].text.includes("invalid or expired"));
+		const invalid = await approvalTool.execute("old-task", { requestId: pendingId, justification: "needed" }, undefined, undefined, ctx);
+		check("old task approval requests are cleared", invalid.content[0].text.includes("invalid"));
 
 		await bounded((async () => {
 			const call = (command: string) => ({ toolName: "bash", input: { command } });
